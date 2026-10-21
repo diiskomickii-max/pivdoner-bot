@@ -101,24 +101,50 @@ def confirm_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def order_status_kb(order_id: int) -> InlineKeyboardMarkup:
-    """Кнопки смены статуса для заведения."""
+def phone_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Отправить мой номер", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def payment_method_kb(order_id: int, pay_url: str) -> InlineKeyboardMarkup:
+    """Выбор способа оплаты после подтверждения заказа (без лишней кнопки статуса)."""
     kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text="✅ Принят", callback_data=f"st:{order_id}:accepted"),
-        InlineKeyboardButton(text="🔥 Готовится", callback_data=f"st:{order_id}:cooking"),
-    )
-    kb.row(
-        InlineKeyboardButton(text="🛍 Готов", callback_data=f"st:{order_id}:ready"),
-        InlineKeyboardButton(text="❌ Отменён", callback_data=f"st:{order_id}:cancelled"),
-    )
+    kb.row(InlineKeyboardButton(
+        text="💳 Оплатить онлайн", url=pay_url))
+    kb.row(InlineKeyboardButton(
+        text="✅ Я оплатил онлайн", callback_data=f"paid:{order_id}"))
+    kb.row(InlineKeyboardButton(
+        text="💵 Оплачу на месте", callback_data=f"pay_cash:{order_id}"))
     return kb.as_markup()
 
 
-def client_order_kb(order_id: int) -> InlineKeyboardMarkup:
-    """Кнопки у клиента под его заказом."""
+def status_kb(order_id: int, status: str = "new", payment: str = "none") -> InlineKeyboardMarkup:
+    """Последовательные кнопки управления заказом для администратора/повара."""
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="🔄 Статус заказа", callback_data=f"my_st:{order_id}"))
+    
+    if status == "new":
+        kb.row(InlineKeyboardButton(text="✅ Принять заказ", callback_data=f"st:{order_id}:accepted"))
+        kb.row(InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"st:{order_id}:cancelled"))
+    elif status == "accepted":
+        kb.row(InlineKeyboardButton(text="🔥 Начать готовить", callback_data=f"st:{order_id}:cooking"))
+        kb.row(
+            InlineKeyboardButton(text="🛍 Сразу готов", callback_data=f"st:{order_id}:ready"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"st:{order_id}:cancelled"),
+        )
+    elif status == "cooking":
+        kb.row(InlineKeyboardButton(text="🛍 Заказ готов!", callback_data=f"st:{order_id}:ready"))
+        kb.row(InlineKeyboardButton(text="❌ Отменить", callback_data=f"st:{order_id}:cancelled"))
+    elif status == "ready":
+        kb.row(InlineKeyboardButton(text="🏁 Выдан гостю (Завершить)", callback_data=f"st:{order_id}:completed"))
+    
+    # Кнопка подтверждения оплаты если еще не оплачено и заказ не закрыт
+    if payment != "paid" and status not in ("completed", "cancelled"):
+        kb.row(InlineKeyboardButton(
+            text="💰 Оплата подтверждена", callback_data=f"payok:{order_id}"))
+
     return kb.as_markup()
 
 
@@ -129,44 +155,6 @@ def after_order_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
         InlineKeyboardButton(text="🎮 Игра", callback_data="dice_menu"),
     )
-    return kb.as_markup()
-
-
-def phone_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить мой номер", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-
-
-def payment_method_kb(order_id: int, pay_url: str) -> InlineKeyboardMarkup:
-    """Выбор способа оплаты после подтверждения заказа."""
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(
-        text="💳 Оплатить онлайн", url=pay_url))
-    kb.row(InlineKeyboardButton(
-        text="✅ Я оплатил", callback_data=f"paid:{order_id}"))
-    kb.row(InlineKeyboardButton(
-        text="💵 Оплачу на месте", callback_data=f"pay_cash:{order_id}"))
-    kb.row(InlineKeyboardButton(
-        text="🔄 Статус заказа", callback_data=f"my_st:{order_id}"))
-    return kb.as_markup()
-
-
-def status_kb(order_id: int, payment: str = "none") -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text="✅ Принят", callback_data=f"st:{order_id}:accepted"),
-        InlineKeyboardButton(text="🔥 Готовится", callback_data=f"st:{order_id}:cooking"),
-    )
-    kb.row(
-        InlineKeyboardButton(text="🛍 Готов", callback_data=f"st:{order_id}:ready"),
-        InlineKeyboardButton(text="❌ Отменён", callback_data=f"st:{order_id}:cancelled"),
-    )
-    if payment != "paid":
-        kb.row(InlineKeyboardButton(
-            text="💰 Оплата подтверждена", callback_data=f"payok:{order_id}"))
     return kb.as_markup()
 
 
