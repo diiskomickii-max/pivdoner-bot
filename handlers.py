@@ -118,6 +118,7 @@ async def cmd_start(message: Message, state: FSMContext):
         f"📍 {CAFE['address']}",
         reply_markup=kb.main_menu(),
     )
+    await message.answer("Быстрые действия:", reply_markup=kb.quick_actions_kb())
 
 
 # ---------- Инфо ----------
@@ -185,6 +186,24 @@ async def mini_game(message: Message, state: FSMContext):
                "1–3 → +1 бонус · 4–5 → +2 · 6 → +5 бонусов\n\n"
                "Одна игра в день.",
                reply_markup=kb.dice_kb())
+
+
+@router.callback_query(F.data == "quick_order")
+async def cb_quick_order(cb: CallbackQuery, state: FSMContext):
+    await cb.message.answer("Собери заказ — выбери категорию и добавь позиции:", reply_markup=kb.categories_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "quick_profile")
+async def cb_quick_profile(cb: CallbackQuery, state: FSMContext):
+    await my_profile(cb.message, state)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "quick_history")
+async def cb_quick_history(cb: CallbackQuery, state: FSMContext):
+    await order_history(cb.message, state)
+    await cb.answer()
 
 
 @router.callback_query(F.data == "profile")
@@ -482,20 +501,18 @@ async def cb_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
         comment=data.get("comment", ""),
         total=total,
     )
-    delivered = await _send_order_to_group(bot, order_id, "none", cb.from_user.id)
-    # Клиенту показываем оплату, но заказ уже отправлен администратору.
     pay_url = PAYMENT_URL.format(order_id=order_id, amount=f"{total:.2f}")
-    await cb.message.edit_text(
-        f"✅ <b>Заказ №{order_id} принят!</b>\n\n"
+    confirmation = (
+        f"✅ <b>Заказ №{order_id} сохранён!</b>\n\n"
         f"Он будет готов к {data['pickup_time']}.\n"
         f"📍 Забирай: {CAFE['address']}\n\n"
         f"💰 К оплате: <b>{total:.2f} Br</b>\n\n"
-        + ("✅ Заказ отправлен. Выбери способ оплаты:" if delivered else "⚠️ Не удалось передать заказ кафе. Свяжись с кафе напрямую."),
-        reply_markup=kb.payment_method_kb(order_id, pay_url),
+        "Сначала выбери способ оплаты — после этого заказ уйдёт поварам."
     )
+    await cb.message.edit_text(confirmation, reply_markup=kb.payment_method_kb(order_id, pay_url))
     await save_cart(state, {})
     await state.set_state(OrderForm.browsing)
-    await cb.answer("Заказ отправлен!" if delivered else "Не удалось отправить заказ")
+    await cb.answer("Выбери способ оплаты")
 
 
 @router.callback_query(F.data.startswith("my_st:"))
@@ -553,26 +570,28 @@ async def _send_order_to_group(bot: Bot, order_id: int, payment: str, user_id: i
 async def cb_pay_cash(cb: CallbackQuery, bot: Bot):
     order_id = int(cb.data.split(":", 1)[1])
     await set_order_payment(order_id, "cash")
+    delivered = await _send_order_to_group(bot, order_id, "cash", cb.from_user.id)
     await cb.message.edit_text(
         f"✅ <b>Заказ №{order_id} оформлен!</b>\n\n"
         "💵 Способ оплаты: <b>на месте при получении</b>.\n"
-        "Уведомления о статусе будут приходить сюда.",
+        + ("Заказ передан поварам. Уведомления о статусе будут приходить сюда." if delivered else "⚠️ Не удалось передать заказ поварам. Свяжитесь с кафе напрямую."),
         reply_markup=None,
     )
-    await cb.answer("Оплата на месте")
+    await cb.answer("Заказ отправлен поварам" if delivered else "Ошибка отправки заказа")
 
 
 @router.callback_query(F.data.startswith("paid:"))
 async def cb_paid(cb: CallbackQuery, bot: Bot):
     order_id = int(cb.data.split(":", 1)[1])
     await set_order_payment(order_id, "online_marked")
+    delivered = await _send_order_to_group(bot, order_id, "online_marked", cb.from_user.id)
     await cb.message.edit_text(
         f"✅ <b>Заказ №{order_id} оформлен!</b>\n\n"
         "💳 Вы выбрали <b>оплату онлайн</b>.\n"
-        "Уведомления о статусе будут приходить сюда.",
+        + ("Заказ передан поварам. Уведомления о статусе будут приходить сюда." if delivered else "⚠️ Не удалось передать заказ поварам. Свяжитесь с кафе напрямую."),
         reply_markup=None,
     )
-    await cb.answer("Оплата отмечена")
+    await cb.answer("Заказ отправлен поварам" if delivered else "Ошибка отправки заказа")
 
 
 AUTO_COOKING_DELAY = 150  # 2.5 минуты
@@ -588,6 +607,7 @@ def _schedule_auto_cooking(
         order = await get_order(order_id)
         if not order:
             return
+        order = dict(order)
         if order.get("status") in ("new", "accepted"):
             await set_order_status(order_id, "cooking")
             order["status"] = "cooking"
@@ -633,6 +653,7 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
     if not order:
         await cb.answer()
         return
+    order = dict(order)
 
     order["status"] = status
     # Редактируем сообщение заказа в админ-чате, обновляя статус и последовательные кнопки
@@ -641,7 +662,7 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
         new_kb = kb.status_kb(order_id, status=status, payment=order.get("payment", "none"))
         await cb.message.edit_text(new_text, reply_markup=new_kb)
     except Exception:
-        pass
+        logging.exception("Could not update order card %s after status change", order_id)
 
     await cb.answer(f"Статус: {text}")
 
@@ -669,6 +690,7 @@ async def cb_payok(cb: CallbackQuery, bot: Bot):
     if not order:
         await cb.answer()
         return
+    order = dict(order)
 
     order["payment"] = "paid"
     try:
