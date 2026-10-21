@@ -7,7 +7,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import keyboards as kb
-from config import MANAGER_CHAT_ID, PAYMENT_ENABLED, PAYMENT_URL
+from config import (DEMO_MODE, MANAGER_CHAT_ID, PAYMENT_ENABLED, PAYMENT_URL,
+                    SELLER_CONTACT)
 from db import (add_bonus, create_order, get_active_orders, get_order,
                 get_order_status, get_today_stats, get_user, get_user_orders,
                 set_last_bonus_game, set_order_payment, set_order_status,
@@ -18,11 +19,44 @@ from states import OrderForm
 router = Router()
 
 STATUS_TEXT = {
+    "new": "🆕 Новый",
     "accepted": "✅ Принят",
     "cooking": "🔥 Готовится",
-    "ready": "🛍 Готов",
+    "ready": "🛍 Готов к выдаче",
+    "completed": "🏁 Выдан гостю",
     "cancelled": "❌ Отменён",
 }
+
+PAYMENT_TEXT = {
+    "none": "не выбрана",
+    "cash": "💵 на месте",
+    "online_marked": "💳 онлайн (ждёт подтверждения)",
+    "paid": "✅ оплачен онлайн",
+}
+
+
+def make_order_text(order: dict, is_demo: bool = False) -> str:
+    """Формирует актуальный текст заказа для админ-чата без дублирования статусов."""
+    pay_str = PAYMENT_TEXT.get(order.get("payment", "none"), order.get("payment", "none"))
+    st_str = STATUS_TEXT.get(order.get("status", "new"), order.get("status", "new"))
+    text = (
+        f"🆕 <b>Предзаказ №{order['id']}</b>\n\n"
+        f"{order['items']}\n\n"
+        f"💰 <b>{order['total']:.2f} Br</b>\n\n"
+        f"👤 {order['name']}\n"
+        f"📱 {order['phone']}\n"
+        f"🕐 Придёт за заказом: <b>{order['pickup_time']}</b>\n"
+        f"🍽 {pickup_ready_text(order['pickup_time'])}\n"
+        f"💳 Оплата: <b>{pay_str}</b>\n"
+        f"📊 Статус: <b>{st_str}</b>"
+    )
+    if order.get("comment"):
+        text += f"\n💬 {order['comment']}"
+    if order.get("username"):
+        text += f"\n🔗 @{order['username']}"
+    if is_demo:
+        text = "🧪 <b>Демо-режим (ты как админ видишь заказ):</b>\n\n" + text
+    return text
 
 
 # ---------- Хелперы ----------
@@ -470,8 +504,8 @@ async def cb_my_status(cb: CallbackQuery):
     if not order:
         await cb.answer("Заказ не найден")
         return
-    pay = PAYMENT_TEXT.get(order["payment"], order["payment"])
-    st = STATUS_TEXT.get(order["status"], order["status"])
+    pay = PAYMENT_TEXT.get(order.get("payment", "none"), order.get("payment", "none"))
+    st = STATUS_TEXT.get(order.get("status", "new"), order.get("status", "new"))
     await cb.answer(
         f"№{order_id} · {st} · 💳 {pay} · {order['pickup_time']}",
         show_alert=True,
@@ -486,26 +520,140 @@ async def cb_cancel(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+# ---------- Отправка заказа и оплата ----------
+
+async def _send_order_to_group(bot: Bot, order_id: int, payment: str, user_id: int = 0):
+    """Отправляет заказ в группу заведения или в личку гостя в демо-режиме."""
+    order = await get_order(order_id)
+    if not order:
+        return
+    order["payment"] = payment
+    order["status"] = "new"
+
+    chat = user_id if DEMO_MODE else MANAGER_CHAT_ID
+    manager_text = make_order_text(order, is_demo=DEMO_MODE)
+    manager_kb = kb.status_kb(order_id, status="new", payment=payment)
+    try:
+        sent_msg = await bot.send_message(chat, manager_text, reply_markup=manager_kb)
+        await bot.send_message(chat, f"🔔 Новый заказ №{order_id} — смотри выше!")
+        # Авто-перевод в «Готовится» через 2.5 мин если повар не нажал сам
+        _schedule_auto_cooking(
+            bot, order_id, order["user_id"], sent_msg.chat.id, sent_msg.message_id
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("pay_cash:"))
+async def cb_pay_cash(cb: CallbackQuery, bot: Bot):
+    order_id = int(cb.data.split(":", 1)[1])
+    await set_order_payment(order_id, "cash")
+    await cb.message.edit_text(
+        f"✅ <b>Заказ №{order_id} оформлен!</b>\n\n"
+        "💵 Способ оплаты: <b>на месте при получении</b>.\n"
+        "Мы уже передали заказ поварам. Все уведомления о готовности («Принят», «Готовится», «Готов») будут приходить сюда автоматически!",
+        reply_markup=None,
+    )
+    await _send_order_to_group(bot, order_id, "cash", cb.from_user.id)
+    await cb.answer("Оплата на месте")
+
+
+@router.callback_query(F.data.startswith("paid:"))
+async def cb_paid(cb: CallbackQuery, bot: Bot):
+    order_id = int(cb.data.split(":", 1)[1])
+    await set_order_payment(order_id, "online_marked")
+    await cb.message.edit_text(
+        f"✅ <b>Заказ №{order_id} оформлен!</b>\n\n"
+        "💳 Вы выбрали <b>оплату онлайн</b>.\n"
+        "Мы уже передали заказ поварам. Все уведомления о готовности («Принят», «Готовится», «Готов») будут приходить сюда автоматически!",
+        reply_markup=None,
+    )
+    await _send_order_to_group(bot, order_id, "online_marked", cb.from_user.id)
+    await cb.answer("Оплата отмечена")
+
+
+AUTO_COOKING_DELAY = 150  # 2.5 минуты
+
+
+def _schedule_auto_cooking(
+    bot: Bot, order_id: int, user_id: int, message_chat_id: int, message_id: int
+):
+    """Через 2.5 минуты, если повар ещё не перевёл заказ в готовку, статус
+    автоматически становится «Готовится», обновляются кнопки в админке и шлётся пуш клиенту."""
+    async def _job():
+        await asyncio.sleep(AUTO_COOKING_DELAY)
+        order = await get_order(order_id)
+        if not order:
+            return
+        if order.get("status") in ("new", "accepted"):
+            await set_order_status(order_id, "cooking")
+            order["status"] = "cooking"
+            # 1. Пуш гостю
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"🔔 <b>Заказ №{order_id}</b>: 🔥 готовится поваром!\nПриготовим точно к {order['pickup_time']}."
+                )
+            except Exception:
+                pass
+            # 2. Обновление карточки заказа в чате админа / группы
+            try:
+                await bot.edit_message_text(
+                    chat_id=message_chat_id,
+                    message_id=message_id,
+                    text=make_order_text(order, is_demo=DEMO_MODE),
+                    reply_markup=kb.status_kb(order_id, status="cooking", payment=order.get("payment", "none")),
+                )
+            except Exception:
+                pass
+
+    asyncio.create_task(_job())
+
+
 # ---------- Статусы (для заведения) ----------
 
 @router.callback_query(F.data.startswith("st:"))
 async def cb_status(cb: CallbackQuery, bot: Bot):
-    _, order_id, status = cb.data.split(":")
+    parts = cb.data.split(":")
+    if len(parts) != 3:
+        await cb.answer()
+        return
+    order_id = int(parts[1])
+    status = parts[2]
     text = STATUS_TEXT.get(status)
     if not text:
         await cb.answer()
         return
+
     await set_order_status(order_id, status)
-    await cb.message.edit_text(cb.message.text + f"\n\n<b>Статус: {text}</b>")
-    await cb.answer(f"Статус: {text}")
-    # уведомление клиенту со звуком
     order = await get_order(order_id)
-    if order:
+    if not order:
+        await cb.answer()
+        return
+
+    order["status"] = status
+    # Редактируем сообщение заказа в админ-чате, обновляя статус и последовательные кнопки
+    try:
+        new_text = make_order_text(order, is_demo=DEMO_MODE)
+        new_kb = kb.status_kb(order_id, status=status, payment=order.get("payment", "none"))
+        await cb.message.edit_text(new_text, reply_markup=new_kb)
+    except Exception:
+        pass
+
+    await cb.answer(f"Статус: {text}")
+
+    # Уведомление клиенту о смене статуса
+    guest_msg = {
+        "accepted": f"🔔 <b>Заказ №{order_id}</b>: ✅ принят в работу!\nСкоро повара начнут приготовление.",
+        "cooking": f"🔔 <b>Заказ №{order_id}</b>: 🔥 готовится поваром!\nПриготовим точно к {order['pickup_time']}.",
+        "ready": f"🔔 <b>Заказ №{order_id}</b>: 🛍 ГОТОВ к выдаче!\nЖдём вас на стойке кафе «ПивДонер».",
+        "completed": f"❤️ <b>Заказ №{order_id} выдан!</b>\nПриятного аппетита! Ждём вас снова в «ПивДонер»!",
+        "cancelled": f"❌ <b>Заказ №{order_id} отменён заведением.</b>",
+    }.get(status)
+
+    if guest_msg and order.get("user_id"):
         try:
-            await bot.send_message(
-                order["user_id"],
-                f"🔔 <b>Заказ №{order_id}</b>: {text.lower()}"
-            )
+            await bot.send_message(order["user_id"], guest_msg)
         except Exception:
             pass
 
@@ -514,10 +662,22 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
 async def cb_payok(cb: CallbackQuery, bot: Bot):
     order_id = int(cb.data.split(":", 1)[1])
     await set_order_payment(order_id, "paid")
-    await cb.message.edit_text(cb.message.text + "\n\n<b>💰 Оплата подтверждена</b>")
-    await cb.answer("Оплата подтверждена")
     order = await get_order(order_id)
-    if order:
+    if not order:
+        await cb.answer()
+        return
+
+    order["payment"] = "paid"
+    try:
+        new_text = make_order_text(order, is_demo=DEMO_MODE)
+        new_kb = kb.status_kb(order_id, status=order.get("status", "new"), payment="paid")
+        await cb.message.edit_text(new_text, reply_markup=new_kb)
+    except Exception:
+        pass
+
+    await cb.answer("Оплата подтверждена")
+
+    if order.get("user_id"):
         try:
             await bot.send_message(
                 order["user_id"],
@@ -548,107 +708,19 @@ async def cb_admin_active(cb: CallbackQuery):
 async def cb_admin_help(cb: CallbackQuery):
     text = (
         "📖 <b>Как работать с заказами</b>\n\n"
-        "1️⃣ Заказ приходит в этот чат → жми <b>«✅ Принят»</b>\n"
-        "2️⃣ Пробей в кассе / скажи повару → жми <b>«🔥 Готовится»</b>\n"
-        "3️⃣ Когда собрал — жми <b>«🛍 Готов»</b> (гость получит уведомление)\n"
-        "4️⃣ Если отменяют — <b>«❌ Отменён»</b>\n\n"
+        "1️⃣ Заказ приходит в этот чат → жми <b>«✅ Принять заказ»</b>\n"
+        "2️⃣ Повар начал делать заказ → жми <b>«🔥 Начать готовить»</b> (или авто через 2.5 мин)\n"
+        "3️⃣ Повар собрал заказ → жми <b>«🛍 Заказ готов!»</b> (гость получит push со звуком)\n"
+        "4️⃣ Отдал гостю → жми <b>«🏁 Выдан гостю (Завершить)»</b>\n"
+        "5️⃣ Если отменяют — <b>«❌ Отменить заказ»</b>\n\n"
         "<b>Оплата:</b>\n"
-        "• «💳 Оплатить онлайн» → гость платит по ссылке банка\n"
+        "• «💳 Оплатить онлайн» → гость платит по ссылке\n"
         "• «💵 На месте» → платит при получении\n"
         "• Когда деньги пришли — жми <b>«💰 Оплата подтверждена»</b>\n\n"
-        "🕐 «Придёт за заказом» — время прихода гостя\n"
-        "🍽 «собрать к…» — когда заказ должен быть готов\n\n"
         "Включи звук уведомлений в этом чате, чтобы не пропускать заказы."
     )
     await cb.message.answer(text, reply_markup=kb.admin_kb())
     await cb.answer()
-
-
-PAYMENT_TEXT = {
-    "none": "не выбрана",
-    "cash": "💵 на месте",
-    "online_marked": "💳 онлайн (ждёт подтверждения)",
-    "paid": "✅ оплачен онлайн",
-}
-
-
-async def _send_order_to_group(bot: Bot, order_id: int, payment: str):
-    """Отправляет заказ в группу заведения с указанным способом оплаты."""
-    order = await get_order(order_id)
-    if not order:
-        return
-    pay_str = PAYMENT_TEXT.get(payment, payment)
-    manager_text = (
-        f"🆕 <b>Новый предзаказ №{order_id}</b>\n\n{order['items']}\n\n"
-        f"💰 {order['total']:.2f} Br\n\n"
-        f"👤 {order['name']}\n"
-        f"📱 {order['phone']}\n"
-        f"🕐 Придёт за заказом: {order['pickup_time']}\n"
-        f"🍽 {pickup_ready_text(order['pickup_time'])}\n"
-        f"💳 Оплата: <b>{pay_str}</b>"
-    )
-    if order["comment"]:
-        manager_text += f"\n💬 {order['comment']}"
-    if order["username"]:
-        manager_text += f"\n🔗 @{order['username']}"
-    try:
-        await bot.send_message(
-            MANAGER_CHAT_ID, manager_text,
-            reply_markup=kb.status_kb(order_id, payment))
-        await bot.send_message(MANAGER_CHAT_ID, "🔔 Новый заказ — смотри выше!")
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data.startswith("pay_cash:"))
-async def cb_pay_cash(cb: CallbackQuery, bot: Bot):
-    order_id = int(cb.data.split(":", 1)[1])
-    await set_order_payment(order_id, "cash")
-    await cb.message.edit_text(
-        "💵 Ок, оплата на месте при получении.\n"
-        "Ждём тебя!",
-        reply_markup=kb.client_order_kb(order_id),
-    )
-    await _send_order_to_group(bot, order_id, "cash")
-    _schedule_auto_cooking(bot, order_id, cb.from_user.id)
-    await cb.answer("Оплата на месте")
-
-
-@router.callback_query(F.data.startswith("paid:"))
-async def cb_paid(cb: CallbackQuery, bot: Bot):
-    order_id = int(cb.data.split(":", 1)[1])
-    await set_order_payment(order_id, "online_marked")
-    await cb.message.edit_text(
-        "💳 Ты отметил оплату онлайн.\n"
-        "Проверим и подтвердим — уведомим здесь.\n\n"
-        "Что дальше?",
-        reply_markup=kb.client_order_kb(order_id),
-    )
-    await _send_order_to_group(bot, order_id, "online_marked")
-    _schedule_auto_cooking(bot, order_id, cb.from_user.id)
-    await cb.answer("Отмечено")
-
-
-AUTO_COOKING_DELAY = 150  # секунд — если админ не отреагировал
-
-
-def _schedule_auto_cooking(bot: Bot, order_id: int, user_id: int):
-    """Через N минут, если админ не перевёл заказ в работу, клиенту приходит
-    «готовится» автоматически — чтобы не висеть без ответа."""
-    async def _job():
-        await asyncio.sleep(AUTO_COOKING_DELAY)
-        status = await get_order_status(order_id)
-        # только если админ ещё не трогал заказ (new) — переводим в cooking
-        if status in (None, "new"):
-            await set_order_status(order_id, "cooking")
-            try:
-                await bot.send_message(
-                    user_id,
-                    f"🔔 <b>Заказ №{order_id}</b> уже готовится — скоро будет готов!"
-                )
-            except Exception:
-                pass
-    asyncio.create_task(_job())
 
 
 # ---------- Отчёт за день (для заведения) ----------
