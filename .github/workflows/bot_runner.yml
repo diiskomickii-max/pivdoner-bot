@@ -1,0 +1,58 @@
+name: PivDoner Bot 24/7 Cloud Runner
+
+on:
+  push:
+    branches: [ master, main ]
+  schedule:
+    # Перезапуск каждые 5 часов для непрерывной 24/7 работы
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: pivdoner-bot
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Restore SQLite Database Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: bot.db
+          key: bot-db-${{ github.run_id }}
+          restore-keys: |
+            bot-db-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Telegram Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MANAGER_CHAT_ID: ${{ secrets.MANAGER_CHAT_ID }}
+          PAYMENT_URL: ${{ secrets.PAYMENT_URL }}
+          PAYMENT_ENABLED: ${{ secrets.PAYMENT_ENABLED }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python bot.py
+
+      - name: Save SQLite Database Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: bot.db
+          key: bot-db-${{ github.run_id }}
