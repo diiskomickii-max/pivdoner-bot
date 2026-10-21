@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from menu import MENU, ITEMS, fmt_price
 
@@ -101,12 +101,8 @@ def confirm_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def phone_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить мой номер", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+def phone_kb() -> ReplyKeyboardRemove:
+    return ReplyKeyboardRemove()
 
 
 def payment_method_kb(order_id: int, pay_url: str) -> InlineKeyboardMarkup:
