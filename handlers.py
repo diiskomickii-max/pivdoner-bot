@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, Message
 import keyboards as kb
 from config import MANAGER_CHAT_ID, PAYMENT_ENABLED, PAYMENT_URL
 from db import (add_bonus, create_order, get_active_orders, get_order,
-                get_today_stats, get_user, get_user_orders,
+                get_order_status, get_today_stats, get_user, get_user_orders,
                 set_last_bonus_game, set_order_payment, set_order_status,
                 upsert_user)
 from menu import CAFE, ITEMS, cart_text, fmt_price, pickup_ready_text
@@ -610,6 +610,7 @@ async def cb_pay_cash(cb: CallbackQuery, bot: Bot):
         reply_markup=kb.client_order_kb(order_id),
     )
     await _send_order_to_group(bot, order_id, "cash")
+    _schedule_auto_cooking(bot, order_id, cb.from_user.id)
     await cb.answer("Оплата на месте")
 
 
@@ -624,7 +625,30 @@ async def cb_paid(cb: CallbackQuery, bot: Bot):
         reply_markup=kb.client_order_kb(order_id),
     )
     await _send_order_to_group(bot, order_id, "online_marked")
+    _schedule_auto_cooking(bot, order_id, cb.from_user.id)
     await cb.answer("Отмечено")
+
+
+AUTO_COOKING_DELAY = 150  # секунд — если админ не отреагировал
+
+
+def _schedule_auto_cooking(bot: Bot, order_id: int, user_id: int):
+    """Через N минут, если админ не перевёл заказ в работу, клиенту приходит
+    «готовится» автоматически — чтобы не висеть без ответа."""
+    async def _job():
+        await asyncio.sleep(AUTO_COOKING_DELAY)
+        status = await get_order_status(order_id)
+        # только если админ ещё не трогал заказ (new) — переводим в cooking
+        if status in (None, "new"):
+            await set_order_status(order_id, "cooking")
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"🔔 <b>Заказ №{order_id}</b> уже готовится — скоро будет готов!"
+                )
+            except Exception:
+                pass
+    asyncio.create_task(_job())
 
 
 # ---------- Отчёт за день (для заведения) ----------

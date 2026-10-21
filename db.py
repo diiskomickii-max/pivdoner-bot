@@ -95,6 +95,13 @@ async def get_today_stats():
         return rows, total
 
 
+async def get_order_status(order_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT status FROM orders WHERE id=?", (order_id,))
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
 async def get_active_orders(limit=10):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
