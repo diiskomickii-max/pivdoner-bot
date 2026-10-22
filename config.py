@@ -8,11 +8,20 @@ load_dotenv(BASE_DIR / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 FALLBACK_BOT_TOKEN = os.getenv("FALLBACK_BOT_TOKEN", "***REMOVED***")
+
 # Чат заведения, куда падают заказы (id группы/лички менеджера)
-MANAGER_CHAT_ID = int(os.getenv("MANAGER_CHAT_ID", "0"))
+MANAGER_CHAT_ID = int(os.getenv("MANAGER_CHAT_ID", "-5459778175"))
+
+# Список Telegram ID администраторов через запятую
+raw_admin_ids = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = [
+    int(x.strip())
+    for x in raw_admin_ids.split(",")
+    if x.strip().lstrip("-").isdigit()
+]
 
 # Демо-режим: 0 = боевой (заказы в группу), 1 = демо (заказы клиенту в этот же чат)
-DEMO_MODE = os.getenv("DEMO_MODE", "1") == "1"
+DEMO_MODE = os.getenv("DEMO_MODE", "0") == "1"
 SELLER_CONTACT = os.getenv("SELLER_CONTACT", "@xxlkkl")
 
 # Оплата онлайн
