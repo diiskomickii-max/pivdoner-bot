@@ -34,6 +34,10 @@ class AdminCancelForm(StatesGroup):
     waiting_for_reason = State()    # администратор вводит причину отмены заказа текстом
 
 
+class AdminStopForm(StatesGroup):
+    waiting_for_reason = State()    # администратор вводит свою причину стопа блюда/добавки текстом
+
+
 class OrderForm(StatesGroup):
     browsing = State()          # листает меню / корзина
     delivery_choice = State()   # выбор: Яндекс Доставка / Самовывоз

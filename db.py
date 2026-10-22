@@ -62,12 +62,24 @@ CREATE TABLE IF NOT EXISTS reviews (
 """
 
 
+
+CREATE_STOP_LIST = """
+CREATE TABLE IF NOT EXISTS stop_list (
+    item_id TEXT PRIMARY KEY,
+    item_name TEXT NOT NULL,
+    item_type TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_ORDERS)
         await db.execute(CREATE_USERS)
         await db.execute(CREATE_COMPLAINTS)
         await db.execute(CREATE_REVIEWS)
+        await db.execute(CREATE_STOP_LIST)
         # миграция: добавить колонку payment в старые базы
         try:
             await db.execute("ALTER TABLE orders ADD COLUMN payment TEXT NOT NULL DEFAULT 'none'")
@@ -489,3 +501,57 @@ async def get_user_average_rating(user_id: int):
         return 0, 0.0
 
 
+
+
+# ---------- Стоп-лист (Блюда и ингредиенты) ----------
+
+STOP_LIST_CACHE = None
+
+
+async def get_stop_list() -> dict:
+    """Возвращает словарь {item_id: {'item_id': ..., 'item_name': ..., 'item_type': ..., 'reason': ...}}."""
+    global STOP_LIST_CACHE
+    if STOP_LIST_CACHE is not None:
+        return STOP_LIST_CACHE
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM stop_list")
+        rows = await cur.fetchall()
+        STOP_LIST_CACHE = {r["item_id"]: dict(r) for r in rows}
+        return STOP_LIST_CACHE
+
+
+async def add_to_stop_list(item_id: str, item_name: str, item_type: str, reason: str):
+    """Добавляет блюдо или добавку в стоп-лист с указанием причины."""
+    global STOP_LIST_CACHE
+    now = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO stop_list (item_id, item_name, item_type, reason, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(item_id) DO UPDATE SET 
+                   item_name=excluded.item_name,
+                   item_type=excluded.item_type,
+                   reason=excluded.reason,
+                   created_at=excluded.created_at""",
+            (item_id, item_name, item_type, reason, now),
+        )
+        await db.commit()
+    STOP_LIST_CACHE = None
+    await get_stop_list()
+
+
+async def remove_from_stop_list(item_id: str):
+    """Удаляет позицию из стоп-листа (возвращает в меню)."""
+    global STOP_LIST_CACHE
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM stop_list WHERE item_id=?", (item_id,))
+        await db.commit()
+    STOP_LIST_CACHE = None
+    await get_stop_list()
+
+
+async def get_item_stop_info(item_id: str) -> dict | None:
+    """Проверяет, находится ли позиция на стопе. Возвращает dict с причиной или None."""
+    sl = await get_stop_list()
+    return sl.get(item_id)

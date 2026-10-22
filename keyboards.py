@@ -169,13 +169,17 @@ def categories_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def items_kb(cat: str, cart: dict) -> InlineKeyboardMarkup:
+def items_kb(cat: str, cart: dict, stop_list: dict = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for item in MENU[cat]:
-        qty = cart.get(item["id"], 0)
-        label = f"{item['name']} — {fmt_price(item['price'])}"
-        if qty:
-            label += f"  ✓{qty}"
+        is_stopped = bool(stop_list and item["id"] in stop_list)
+        if is_stopped:
+            label = f"⛔ {item['name']} (СТОП)"
+        else:
+            qty = cart.get(item["id"], 0)
+            label = f"{item['name']} — {fmt_price(item['price'])}"
+            if qty:
+                label += f"  ✓{qty}"
         kb.row(InlineKeyboardButton(text=label, callback_data=f"item:{item['id']}"))
     kb.row(
         InlineKeyboardButton(text="⬅️ Категории", callback_data="menu"),
@@ -203,17 +207,22 @@ def item_kb(item_id: str, qty: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def toppings_selector_kb(doner_id: str, mask: str = "") -> InlineKeyboardMarkup:
+def toppings_selector_kb(doner_id: str, mask: str = "", stop_list: dict = None) -> InlineKeyboardMarkup:
     """
-    Интерактивный конструктор добавок к конкретной шаурме.
+    Интерактивный конструктор добавок к конкретной шаурме с учётом стоп-листа.
     mask: строка выбранных цифр-индексов в TOPPINGS, например '02' (сыр + халапеньо).
     """
     kb = InlineKeyboardBuilder()
     base_item = ITEMS.get(doner_id, {})
     total_price = base_item.get("price", 0.0)
 
-    # Список доступных добавок в виде кнопок с отметкой [✓] / [▫️]
     for idx, top in enumerate(TOPPINGS):
+        top_id = top["id"]
+        is_stopped = bool(stop_list and top_id in stop_list)
+        if is_stopped:
+            label = f"⛔ {top['name']} (закончилась)"
+            kb.row(InlineKeyboardButton(text=label, callback_data=f"top_blocked:{top_id}"))
+            continue
         is_selected = str(idx) in mask
         prefix = "✅" if is_selected else "▫️"
         label = f"{prefix} {top['name']} (+{top['price']:.2f} Br)"
@@ -386,8 +395,9 @@ def admin_kb() -> InlineKeyboardMarkup:
     )
     kb.row(
         InlineKeyboardButton(text="📋 Активные заказы", callback_data="admin_active"),
-        InlineKeyboardButton(text="📖 Инструкция", callback_data="admin_help"),
+        InlineKeyboardButton(text="⛔ Стоп-лист кухни", callback_data="admin_stop_list"),
     )
+    kb.row(InlineKeyboardButton(text="📖 Инструкция", callback_data="admin_help"))
     return kb.as_markup()
 
 
@@ -433,4 +443,60 @@ def webapp_kb() -> InlineKeyboardMarkup:
 def dice_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="🎲 Бросить кубик", callback_data="dice"))
+    return kb.as_markup()
+
+
+def admin_stop_menu_kb(has_stopped: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="➕ Поставить БЛЮДО на стоп", callback_data="stop_add_dish"))
+    kb.row(InlineKeyboardButton(text="➕ Поставить ДОБАВКУ на стоп", callback_data="stop_add_top"))
+    if has_stopped:
+        kb.row(InlineKeyboardButton(text="🟢 Снять позицию со стопа (Вернуть)", callback_data="stop_unstop_menu"))
+    kb.row(
+        InlineKeyboardButton(text="🔄 Обновить список", callback_data="stop_list_refresh"),
+        InlineKeyboardButton(text="⚙️ Панель администратора", callback_data="admin_menu"),
+    )
+    return kb.as_markup()
+
+
+def admin_stop_choose_dish_kb(stop_list: dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for cat, items in MENU.items():
+        if cat == "🧀 Добавки в шаурму":
+            continue
+        for item in items:
+            if item["id"] in stop_list:
+                continue
+            kb.row(InlineKeyboardButton(text=f"⛔ {item['name']}", callback_data=f"stop_pick:dish:{item['id']}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад в стоп-лист", callback_data="admin_stop_list"))
+    return kb.as_markup()
+
+
+def admin_stop_choose_top_kb(stop_list: dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for top in TOPPINGS:
+        if top["id"] in stop_list:
+            continue
+        kb.row(InlineKeyboardButton(text=f"⛔ {top['name']}", callback_data=f"stop_pick:top:{top['id']}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад в стоп-лист", callback_data="admin_stop_list"))
+    return kb.as_markup()
+
+
+def admin_stop_unstop_kb(stop_list: dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for item_id, info in stop_list.items():
+        name = info.get("item_name") or ITEMS.get(item_id, {}).get("name", item_id)
+        kb.row(InlineKeyboardButton(text=f"🟢 Вернуть: {name}", callback_data=f"stop_unstop_do:{item_id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад в стоп-лист", callback_data="admin_stop_list"))
+    return kb.as_markup()
+
+
+def admin_stop_reason_kb(item_id: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🥩 Закончились ингредиенты", callback_data=f"stop_set_r:{item_id}:ingredients"))
+    kb.row(InlineKeyboardButton(text="🚚 Задержка поставки продуктов", callback_data=f"stop_set_r:{item_id}:supplier"))
+    kb.row(InlineKeyboardButton(text="⚙️ Проблема с оборудованием", callback_data=f"stop_set_r:{item_id}:equipment"))
+    kb.row(InlineKeyboardButton(text="⏳ Временно не успеваем готовить", callback_data=f"stop_set_r:{item_id}:overload"))
+    kb.row(InlineKeyboardButton(text="✍️ Ввести свою причину", callback_data=f"stop_set_r:{item_id}:custom"))
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_stop_list"))
     return kb.as_markup()
