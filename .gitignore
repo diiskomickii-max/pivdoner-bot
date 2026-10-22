@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 venv/
 qr_bot.png
+reports/
+*.xlsx
+
