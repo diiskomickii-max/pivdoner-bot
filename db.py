@@ -1,4 +1,5 @@
 import aiosqlite
+import re
 from datetime import datetime
 from config import DB_PATH
 from menu import ITEMS
@@ -14,6 +15,9 @@ CREATE TABLE IF NOT EXISTS orders (
     items TEXT NOT NULL,
     comment TEXT,
     total REAL NOT NULL,
+    delivery_type TEXT NOT NULL DEFAULT 'pickup',
+    delivery_address TEXT,
+    delivery_cost REAL NOT NULL DEFAULT 0.0,
     status TEXT NOT NULL DEFAULT 'new',
     payment TEXT NOT NULL DEFAULT 'none',
     created_at TEXT NOT NULL
@@ -28,6 +32,31 @@ CREATE TABLE IF NOT EXISTS users (
     phone TEXT,
     bonus REAL NOT NULL DEFAULT 0,
     last_bonus_game TEXT,
+    is_verified INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+"""
+
+CREATE_COMPLAINTS = """
+CREATE TABLE IF NOT EXISTS complaints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    username TEXT,
+    name TEXT,
+    phone TEXT,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    created_at TEXT NOT NULL
+);
+"""
+
+CREATE_REVIEWS = """
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    rating INTEGER NOT NULL,
+    comment TEXT,
     created_at TEXT NOT NULL
 );
 """
@@ -37,25 +66,55 @@ async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_ORDERS)
         await db.execute(CREATE_USERS)
+        await db.execute(CREATE_COMPLAINTS)
+        await db.execute(CREATE_REVIEWS)
         # миграция: добавить колонку payment в старые базы
         try:
             await db.execute("ALTER TABLE orders ADD COLUMN payment TEXT NOT NULL DEFAULT 'none'")
         except Exception:
             pass  # колонка уже есть
+        # миграция: добавить колонку is_verified в старые базы
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        # миграции: доставка Яндекс Go
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN delivery_type TEXT NOT NULL DEFAULT 'pickup'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN delivery_address TEXT")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN delivery_cost REAL NOT NULL DEFAULT 0.0")
+        except Exception:
+            pass
+        # миграция: реферальная программа
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        except Exception:
+            pass
         await db.commit()
 
 
 # ---------- Заказы ----------
 
-async def create_order(user_id, username, name, phone, pickup_time, cart, comment, total):
+async def create_order(
+    user_id, username, name, phone, pickup_time, cart, comment, total,
+    delivery_type="pickup", delivery_address="", delivery_cost=0.0
+):
     items_str = ", ".join(f"{ITEMS[iid]['name']} x{q}" for iid, q in cart.items())
+    now = datetime.now().isoformat(timespec="seconds")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO orders
-               (user_id, username, name, phone, pickup_time, items, comment, total, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               (user_id, username, name, phone, pickup_time, items, comment, total,
+                delivery_type, delivery_address, delivery_cost, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user_id, username, name, phone, pickup_time, items_str, comment, total,
-             datetime.now().isoformat(timespec="seconds")),
+             delivery_type, delivery_address, delivery_cost, now),
         )
         await db.commit()
         return cur.lastrowid
@@ -134,22 +193,50 @@ async def get_user_orders(user_id, limit=10):
 
 # ---------- Профили гостей ----------
 
-async def upsert_user(user_id, username=None, name=None, phone=None):
+async def upsert_user(user_id, username=None, name=None, phone=None, is_verified=None):
     now = datetime.now().isoformat(timespec="seconds")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
         if await cur.fetchone():
             await db.execute(
                 "UPDATE users SET username=COALESCE(?,username), "
-                "name=COALESCE(?,name), phone=COALESCE(?,phone) WHERE user_id=?",
-                (username, name, phone, user_id),
+                "name=COALESCE(?,name), phone=COALESCE(?,phone), "
+                "is_verified=COALESCE(?,is_verified) WHERE user_id=?",
+                (username, name, phone, is_verified, user_id),
             )
         else:
+            ver = is_verified if is_verified is not None else 0
             await db.execute(
-                "INSERT INTO users (user_id, username, name, phone, created_at) VALUES (?,?,?,?,?)",
-                (user_id, username, name, phone, now),
+                "INSERT INTO users (user_id, username, name, phone, is_verified, created_at) VALUES (?,?,?,?,?,?)",
+                (user_id, username, name, phone, ver, now),
             )
         await db.commit()
+
+
+async def update_user_name(user_id, name):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET name=? WHERE user_id=?", (name, user_id))
+        await db.commit()
+
+
+async def update_user_phone(user_id, phone, is_verified=1):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET phone=?, is_verified=? WHERE user_id=?",
+            (phone, is_verified, user_id),
+        )
+        await db.commit()
+
+
+async def get_user_stats(user_id):
+    """Статистика гостя для личного кабинета: количество заказов и сумма покупок."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(total), 0) FROM orders WHERE user_id=? AND status != 'cancelled'",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        return (row[0], row[1]) if row else (0, 0.0)
 
 
 async def get_user(user_id):
@@ -169,3 +256,165 @@ async def set_last_bonus_game(user_id, ts):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET last_bonus_game=? WHERE user_id=?", (ts, user_id))
         await db.commit()
+
+
+# ---------- Жалобы и обращения ----------
+
+async def create_complaint(user_id, username, name, phone, text):
+    now = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO complaints (user_id, username, name, phone, text, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, username, name, phone, text, now),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def search_orders_by_phone(phone_query: str):
+    """Поиск истории заказов гостя по номеру телефона для администратора."""
+    digits = re.sub(r"\D", "", phone_query.strip())
+    if not digits:
+        return None, []
+
+    # Берём для поиска последние 7-9 цифр для универсального поиска по любым форматам
+    search_suffix = f"%{digits[-7:]}%" if len(digits) >= 7 else f"%{digits}%"
+    full_pattern = f"%{digits}%"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Ищем профиль пользователя
+        cur_u = await db.execute(
+            "SELECT * FROM users WHERE phone LIKE ? OR phone LIKE ? ORDER BY user_id DESC LIMIT 1",
+            (full_pattern, search_suffix),
+        )
+        user = await cur_u.fetchone()
+
+        # Ищем все заказы с таким телефоном
+        cur_o = await db.execute(
+            """SELECT * FROM orders 
+               WHERE phone LIKE ? OR phone LIKE ? 
+               ORDER BY id DESC""",
+            (full_pattern, search_suffix),
+        )
+        orders = await cur_o.fetchall()
+
+        # Если в таблице orders номер был записан чуть иначе, но профиль найден
+        if not orders and user:
+            cur_o = await db.execute(
+                "SELECT * FROM orders WHERE user_id=? ORDER BY id DESC",
+                (user["user_id"],),
+            )
+            orders = await cur_o.fetchall()
+
+        return dict(user) if user else None, [dict(o) for o in orders]
+
+
+# ---------- Отзывы (NPS) ----------
+
+async def create_review(order_id: int, user_id: int, rating: int, comment: str = ""):
+    now = datetime.now().isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO reviews (order_id, user_id, rating, comment, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (order_id, user_id, rating, comment, now),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_all_users(verified_only: bool = False):
+    """Список всех пользователей для таргетированной рассылки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sql = "SELECT * FROM users WHERE is_verified=1" if verified_only else "SELECT * FROM users"
+        cur = await db.execute(sql)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_all_orders_for_export(limit: int = 1000):
+    """Список всех заказов для выгрузки отчёта в Excel."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM orders ORDER BY id DESC LIMIT ?", (limit,))
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------- Реферальная программа ----------
+
+async def set_referrer(user_id: int, referrer_id: int) -> bool:
+    """Устанавливает реферера и начисляет приветственный бонус 2.0 Br новому гостю."""
+    if user_id == referrer_id:
+        return False
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT referred_by FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if row and row["referred_by"] is not None:
+            return False
+
+        await db.execute(
+            "UPDATE users SET referred_by=?, bonus=bonus+2.0 WHERE user_id=?",
+            (referrer_id, user_id),
+        )
+        await db.commit()
+        return True
+
+
+async def get_user_referral_stats(user_id: int):
+    """Возвращает (кол-во приглашённых, начисленные бонусы)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users WHERE referred_by=?", (user_id,))
+        row = await cur.fetchone()
+        invited_cnt = row[0] if row else 0
+        earned_bonus = invited_cnt * 2.0
+        return invited_cnt, earned_bonus
+
+
+# ---------- Статистика отзывов для Администратора ----------
+
+async def get_overall_reviews_stats():
+    """Общая статистика рейтинга (NPS) для заведения."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT 
+                COUNT(*) as total_count,
+                AVG(rating) as avg_rating,
+                SUM(CASE WHEN rating=5 THEN 1 ELSE 0 END) as c5,
+                SUM(CASE WHEN rating=4 THEN 1 ELSE 0 END) as c4,
+                SUM(CASE WHEN rating=3 THEN 1 ELSE 0 END) as c3,
+                SUM(CASE WHEN rating=2 THEN 1 ELSE 0 END) as c2,
+                SUM(CASE WHEN rating=1 THEN 1 ELSE 0 END) as c1
+               FROM reviews"""
+        )
+        stats = await cur.fetchone()
+
+        cur_recent = await db.execute(
+            """SELECT r.*, u.name as user_name, u.phone as user_phone 
+               FROM reviews r 
+               LEFT JOIN users u ON r.user_id = u.user_id 
+               ORDER BY r.id DESC LIMIT 5"""
+        )
+        recent = await cur_recent.fetchall()
+
+        return dict(stats) if stats else {}, [dict(r) for r in recent]
+
+
+async def get_user_average_rating(user_id: int):
+    """Средняя оценка конкретного гостя за всё время."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*), AVG(rating) FROM reviews WHERE user_id=?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if row and row[0] > 0:
+            return row[0], round(row[1], 1)
+        return 0, 0.0
+
+
