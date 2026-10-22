@@ -31,6 +31,7 @@ def is_admin_user(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 from db import (
     add_bonus,
+    add_to_stop_list,
     create_complaint,
     create_order,
     create_review,
@@ -38,15 +39,18 @@ from db import (
     get_all_orders_for_export,
     get_all_users,
     get_broadcast_consent,
+    get_item_stop_info,
     get_order,
     get_order_status,
     get_overall_reviews_stats,
+    get_stop_list,
     get_today_stats,
     get_user,
     get_user_average_rating,
     get_user_orders,
     get_user_referral_stats,
     get_user_stats,
+    remove_from_stop_list,
     search_orders_by_phone,
     set_broadcast_consent,
     set_last_bonus_game,
@@ -64,6 +68,7 @@ from menu import CAFE, ITEMS, MENU, TOPPINGS, TOPPINGS_MAP, cart_text, fmt_price
 from states import (
     AdminCancelForm,
     AdminSearchForm,
+    AdminStopForm,
     BroadcastForm,
     ComplaintForm,
     OrderForm,
@@ -100,6 +105,13 @@ CANCEL_REASONS = {
     "power": "Аварийное отключение электричества / оборудования (форс-мажор)",
     "overload": "Пиковая загрузка кухни, время ожидания более 60 минут",
     "unreachable": "Не удалось связаться с клиентом по указанному номеру",
+}
+
+STOP_REASONS = {
+    "ingredients": "Закончились необходимые ингредиенты",
+    "supplier": "Задержка поставки продуктов от поставщика",
+    "equipment": "Техническое обслуживание / ремонт оборудования",
+    "overload": "Пиковая загрузка кухни, временно не принимается",
 }
 
 
@@ -327,6 +339,14 @@ async def send_main_greeting(message: Message, name: str, bot: Bot = None):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        await message.reply(
+            "👨‍🍳 <b>Группа кухни «ПивДонер» активна!</b>\n\n"
+            "Сюда поступают подтверждённые заказы.\n"
+            "Команды администратора: /stop, /active, /report, /excel, /id, /help"
+        )
+        return
+
     await state.clear()
     await state.set_state(OrderForm.browsing)
 
@@ -647,8 +667,17 @@ async def show_profile(chat_id: int, user_id: int, bot: Bot, state: FSMContext =
         await bot.send_message(chat_id, text, reply_markup=markup)
 
 
+@router.message(Command("profile"))
 @router.message(F.text.in_({"👤 Личный кабинет", "👤 Мой профиль", "/profile"}))
 async def my_profile_msg(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        bot_info = await bot.get_me()
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        from aiogram.types import InlineKeyboardButton
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="👤 Личный кабинет (в личке)", url=f"https://t.me/{bot_info.username}?start=profile"))
+        await message.reply("👤 Личный кабинет гостя доступен в личном чате с ботом:", reply_markup=b.as_markup())
+        return
     await delete(message)
     await show_profile(message.chat.id, message.from_user.id, bot, state)
 
@@ -834,8 +863,11 @@ async def _send_referral_info(chat_id: int, user_id: int, bot: Bot, edit_message
         await bot.send_message(chat_id, text, reply_markup=kb.profile_kb())
 
 
+@router.message(Command(commands=["ref", "referral"]))
 @router.message(F.text.in_({"🎁 Пригласи друга (+2 Br)", "🎁 Реферальная ссылка", "/ref", "/referral"}))
 async def msg_referral_link(message: Message, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        return
     await delete(message)
     await _send_referral_info(message.chat.id, message.from_user.id, bot)
 
@@ -848,8 +880,11 @@ async def cb_referral_link(cb: CallbackQuery, bot: Bot):
 
 # ---------- История заказов и Инфо ----------
 
-@router.message(F.text.in_({"📜 Мои заказы", "📜 История заказов", "/history", "/orders"}))
+@router.message(Command("history"))
+@router.message(F.text.in_({"📜 Мои заказы", "📜 История заказов", "/history"}))
 async def order_history_msg(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        return
     await delete(message)
     await show_history(message.chat.id, message.from_user.id, bot, state)
 
@@ -876,15 +911,17 @@ async def show_history(chat_id: int, user_id: int, bot: Bot, state: FSMContext =
             text += f"№{o['id']} · {dt} · <b>{o.get('total', 0.0):.2f} Br</b> ({deliv})\n  {o.get('items', '')}\n  📊 {st} · {pay}\n\n"
 
     kb_markup = kb.categories_kb()
-    kb_markup = kb.categories_kb()
     if state:
         await send_step_msg(state, bot, chat_id, text, reply_markup=kb_markup)
     else:
         await bot.send_message(chat_id, text, reply_markup=kb_markup)
 
 
-@router.message(F.text.in_({"📍 Адрес и инфо", "📍 Адрес и время работы", "/info", "/help"}))
+@router.message(Command("info"))
+@router.message(F.text.in_({"📍 Адрес и инфо", "📍 Адрес и время работы", "/info"}))
 async def cafe_info_msg(message: Message):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        return
     await message.answer(
         f"📍 <b>{CAFE['name']}</b>\n"
         f"Адрес: {CAFE['address']}\n\n"
@@ -895,10 +932,41 @@ async def cafe_info_msg(message: Message):
     )
 
 
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        text = (
+            "👨‍🍳 <b>Команды кухни и администратора:</b>\n\n"
+            "• /stop или /stoplist — управление стоп-листом кухни (блюда и добавки)\n"
+            "• /active — список активных заказов в работе\n"
+            "• /report — финансовый отчёт за сегодня\n"
+            "• /excel — выгрузка всех заказов в Excel (.xlsx)\n"
+            "• /id — ID текущего чата\n"
+            "• /help — эта справка\n\n"
+            "💡 Все входящие заказы приходят сюда в виде карточек с кнопками управления статусом и печатью чека."
+        )
+        await message.reply(text)
+    else:
+        await message.answer(
+            "🍔 <b>Помощь по боту «ПивДонер»:</b>\n\n"
+            "• /menu — открыть меню блюд\n"
+            "• /order — оформить предзаказ\n"
+            "• /cart — открыть корзину\n"
+            "• /profile — личный кабинет и бонусы\n"
+            "• /history — история ваших заказов\n"
+            "• /game — ежедневная игра в кубик за бонусы\n"
+            "• /complaint — написать обращение руководству",
+            reply_markup=kb.main_menu(),
+        )
+
+
 # ---------- Подача жалобы администратору ----------
 
+@router.message(Command("complaint"))
 @router.message(F.text.in_({"🚨 Подать жалобу", "🚨 Подать жалобу администратору", "Подать жалобу", "Жалоба", "/complaint"}))
 async def start_complaint_msg(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        return
     await delete(message)
     await start_complaint_flow(message.chat.id, message.from_user.id, state, bot)
 
@@ -1005,8 +1073,11 @@ async def _process_and_send_complaint(message: Message, state: FSMContext, bot: 
 
 # ---------- Мини-игра «Кубик» ----------
 
+@router.message(Command("game"))
 @router.message(F.text.in_({"🎲 Игра с бонусами", "🎲 Игра «Кубик»", "🎮 Мини-игра", "/game"}))
 async def mini_game_msg(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        return
     await delete(message)
     user = await get_user(message.from_user.id)
     today = datetime.now().strftime("%Y-%m-%d")
@@ -1065,8 +1136,20 @@ async def cb_dice(cb: CallbackQuery, bot: Bot):
 
 # ---------- Меню и Корзина (Задача 5: Состав шаурмы) ----------
 
+@router.message(Command("menu"))
 @router.message(F.text.in_({"🍔 Меню", "/menu"}))
 async def show_menu_msg(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        bot_info = await bot.get_me()
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        from aiogram.types import InlineKeyboardButton
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="🍔 Открыть меню в боте (в личке)", url=f"https://t.me/{bot_info.username}?start=menu"))
+        await message.reply(
+            "👋 <b>В группе кухни меню не отображается.</b>\nОформить заказ и посмотреть меню можно в личном чате с ботом:",
+            reply_markup=b.as_markup()
+        )
+        return
     await delete(message)
     await send_step_msg(
         state,
@@ -1095,10 +1178,11 @@ async def cb_noop(cb: CallbackQuery):
 async def cb_category(cb: CallbackQuery, state: FSMContext):
     cat = cb.data.split(":", 1)[1]
     cart = await get_cart(state)
+    stop_list = await get_stop_list()
     await cb.message.edit_text(
         f"<b>{cat}</b>\n\n"
         "Нажмите на позицию, чтобы посмотреть подробный состав, граммовку и добавить в корзину:",
-        reply_markup=kb.items_kb(cat, cart),
+        reply_markup=kb.items_kb(cat, cart, stop_list=stop_list),
     )
     await cb.answer()
 
@@ -1121,6 +1205,31 @@ def make_item_card_text(item_id: str, qty: int) -> str:
 @router.callback_query(F.data.startswith("item:"))
 async def cb_item(cb: CallbackQuery, state: FSMContext):
     item_id = cb.data.split(":", 1)[1]
+    stop_info = await get_item_stop_info(item_id)
+    if stop_info:
+        item = ITEMS.get(item_id, {})
+        item_name = item.get("name", item_id)
+        reason = stop_info.get("reason", "Закончилось на кухне")
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        from aiogram.types import InlineKeyboardButton
+        b = InlineKeyboardBuilder()
+        cat = item.get("category", "")
+        if cat:
+            b.row(InlineKeyboardButton(text="⬅️ Назад в категорию", callback_data=f"cat:{cat}"))
+        b.row(
+            InlineKeyboardButton(text="🍔 Главное меню", callback_data="menu"),
+            InlineKeyboardButton(text="🧺 Корзина", callback_data="cart"),
+        )
+        await cb.message.edit_text(
+            f"⛔ <b>Блюдо временно недоступно для заказа!</b>\n\n"
+            f"«<b>{item_name}</b>» сейчас находится на стопе кухни.\n\n"
+            f"📌 <b>Причина:</b> <i>{reason}</i>\n\n"
+            "Приносим искренние извинения за временные неудобства! Пожалуйста, выберите другое аппетитное блюдо из нашего меню.",
+            reply_markup=b.as_markup(),
+        )
+        await cb.answer("Позиция на стопе")
+        return
+
     cart = await get_cart(state)
     qty = cart.get(item_id, 0)
     text = make_item_card_text(item_id, qty)
@@ -1131,6 +1240,10 @@ async def cb_item(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("inc:"))
 async def cb_inc(cb: CallbackQuery, state: FSMContext):
     item_id = cb.data.split(":", 1)[1]
+    stop_info = await get_item_stop_info(item_id)
+    if stop_info:
+        await cb.answer(f"⛔ Блюдо на стопе: {stop_info.get('reason', 'Закончилось')}", show_alert=True)
+        return
     cart = await get_cart(state)
     cart[item_id] = cart.get(item_id, 0) + 1
     await save_cart(state, cart)
@@ -1156,13 +1269,14 @@ async def cb_dec(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("top_sel:"))
 async def cb_top_sel(cb: CallbackQuery):
     doner_id = cb.data.split(":", 1)[1]
+    stop_list = await get_stop_list()
     base = ITEMS.get(doner_id, {})
     text = (
         f"🧀 <b>Конструктор добавок к «{base.get('name', 'Шаурме')}»:</b>\n\n"
         f"Базовая цена: <b>{base.get('price', 0.0):.2f} Br</b>\n\n"
         f"Отмечайте нужные добавки кнопками ниже и нажмите <b>«Добавить в корзину»</b>:"
     )
-    await cb.message.edit_text(text, reply_markup=kb.toppings_selector_kb(doner_id, mask=""))
+    await cb.message.edit_text(text, reply_markup=kb.toppings_selector_kb(doner_id, mask="", stop_list=stop_list))
     await cb.answer()
 
 
@@ -1191,6 +1305,7 @@ async def cb_top_toggle(cb: CallbackQuery):
         total_price += t["price"]
         selected_names.append(t["name"])
 
+    stop_list = await get_stop_list()
     tops_info = f"\nВыбрано: <i>{', '.join(selected_names)}</i>" if selected_names else ""
     text = (
         f"🧀 <b>Конструктор добавок к «{base.get('name', 'Шаурме')}»:</b>\n\n"
@@ -1198,8 +1313,17 @@ async def cb_top_toggle(cb: CallbackQuery):
         f"Итоговая цена: <b>{total_price:.2f} Br</b>\n\n"
         f"Отмечайте нужные добавки кнопками ниже и нажмите <b>«Добавить в корзину»</b>:"
     )
-    await cb.message.edit_text(text, reply_markup=kb.toppings_selector_kb(doner_id, mask=new_mask))
+    await cb.message.edit_text(text, reply_markup=kb.toppings_selector_kb(doner_id, mask=new_mask, stop_list=stop_list))
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("top_blocked:"))
+async def cb_top_blocked(cb: CallbackQuery):
+    top_id = cb.data.split(":", 1)[1]
+    stop_info = await get_item_stop_info(top_id)
+    reason = stop_info.get("reason", "Закончилась на кухне") if stop_info else "Закончилась на кухне"
+    top_name = TOPPINGS_MAP.get(top_id, {}).get("name", top_id)
+    await cb.answer(f"⛔ Добавка «{top_name}» временно на стопе!\nПричина: {reason}", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("top_add:"))
@@ -1208,7 +1332,26 @@ async def cb_top_add(cb: CallbackQuery, state: FSMContext):
     doner_id = parts[1]
     mask = parts[2] if len(parts) >= 3 else ""
 
-    top_ids = [TOPPINGS[int(d)]["id"] for d in mask if d.isdigit() and int(d) < len(TOPPINGS)]
+    stop_list = await get_stop_list()
+    if doner_id in stop_list:
+        dname = ITEMS.get(doner_id, {}).get("name", doner_id)
+        await cb.answer(f"⛔ Блюдо «{dname}» сейчас на стопе кухни!", show_alert=True)
+        return
+
+    stopped_tops = []
+    top_ids = []
+    for d in mask:
+        if d.isdigit() and int(d) < len(TOPPINGS):
+            tid = TOPPINGS[int(d)]["id"]
+            if tid in stop_list:
+                stopped_tops.append(TOPPINGS[int(d)]["name"])
+            else:
+                top_ids.append(tid)
+
+    if stopped_tops:
+        await cb.answer(f"⛔ Добавка {', '.join(stopped_tops)} сейчас на стопе!", show_alert=True)
+        return
+
     if top_ids:
         item_key = f"{doner_id}+{'+'.join(top_ids)}"
     else:
@@ -1223,6 +1366,7 @@ async def cb_top_add(cb: CallbackQuery, state: FSMContext):
     item_price = parsed["price"] if parsed else ITEMS.get(doner_id, {}).get("price", 0.0)
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
     b = InlineKeyboardBuilder()
     b.row(
         InlineKeyboardButton(text="🧺 Перейти в корзину", callback_data="cart"),
@@ -1256,8 +1400,17 @@ async def _render_cart_view(target, state: FSMContext, edit=False, bot: Bot = No
         await send_step_msg(state, bot, chat_id, text, reply_markup=markup)
 
 
+@router.message(Command("cart"))
 @router.message(F.text.in_({"🧺 Корзина", "/cart"}))
 async def show_cart_msg(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        bot_info = await bot.get_me()
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        from aiogram.types import InlineKeyboardButton
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="🧺 Корзина в боте (в личке)", url=f"https://t.me/{bot_info.username}?start=cart"))
+        await message.reply("🧺 Корзина доступна в личном чате с ботом:", reply_markup=b.as_markup())
+        return
     await delete(message)
     await _render_cart_view(None, state, edit=False, bot=bot, chat_id=message.chat.id)
 
@@ -1310,8 +1463,17 @@ async def cb_clear(cb: CallbackQuery, state: FSMContext):
 
 # ---------- Оформление заказа (Задачи 1, 2, 3, 4) ----------
 
+@router.message(Command("order"))
 @router.message(F.text.in_({"🛒 Оформить заказ", "🛒 Оформить предзаказ", "/order"}))
 async def start_order_msg(message: Message, state: FSMContext, bot: Bot):
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
+        bot_info = await bot.get_me()
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        from aiogram.types import InlineKeyboardButton
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="🛒 Оформить заказ в боте (в личке)", url=f"https://t.me/{bot_info.username}?start=order"))
+        await message.reply("🛒 Оформление заказа доступно в личном чате с ботом:", reply_markup=b.as_markup())
+        return
     await delete(message)
     cart = await get_cart(state)
     if not cart:
@@ -1347,7 +1509,51 @@ async def cb_checkout(cb: CallbackQuery, state: FSMContext, bot: Bot):
 
 
 async def proceed_to_checkout(chat_id: int, user_id: int, state: FSMContext, bot: Bot):
-    """Начало чистого оформления заказа с проверкой верификации гостя и выбором доставки."""
+    """Начало чистого оформления заказа с проверкой стоп-листа кухни, верификации гостя и выбором доставки."""
+    cart = await get_cart(state)
+    if not cart:
+        await send_step_msg(
+            state,
+            bot,
+            chat_id,
+            "🧺 Корзина пуста. Сначала добавьте блюда из меню:",
+            reply_markup=kb.categories_kb(),
+        )
+        return
+
+    # Проверка позиций корзины по актуальному стоп-листу кухни
+    stop_list = await get_stop_list()
+    if stop_list:
+        stopped_in_cart = []
+        for raw_id in cart.keys():
+            parsed = parse_cart_item(raw_id)
+            base_id = parsed["base_id"] if parsed else raw_id
+            if base_id in stop_list:
+                stopped_in_cart.append((parsed["name"] if parsed else base_id, stop_list[base_id].get("reason", "Закончилось на кухне")))
+            if parsed and parsed.get("toppings"):
+                for top_id in parsed["toppings"]:
+                    if top_id in stop_list:
+                        top_name = TOPPINGS_MAP.get(top_id, {}).get("name", top_id)
+                        stopped_in_cart.append((f"{parsed['name']} (добавка {top_name})", stop_list[top_id].get("reason", "Закончилась на кухне")))
+
+        if stopped_in_cart:
+            err_lines = "\n".join([f"• <b>{name}</b> — <i>{reason}</i>" for name, reason in stopped_in_cart])
+            from aiogram.utils.keyboard import InlineKeyboardBuilder
+            from aiogram.types import InlineKeyboardButton
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(text="🧺 Открыть корзину и изменить", callback_data="cart"))
+            b.row(InlineKeyboardButton(text="🍔 Меню", callback_data="menu"))
+            await send_step_msg(
+                state,
+                bot,
+                chat_id,
+                f"⚠️ <b>Внимание: часть позиций в вашей корзине сейчас на стопе кухни!</b>\n\n"
+                f"{err_lines}\n\n"
+                "Пожалуйста, удалите эти позиции из корзины или замените их перед продолжением заказа.",
+                reply_markup=b.as_markup(),
+            )
+            return
+
     user = await get_user(user_id)
 
     # Задача 4: Проверяем, зарегистрирован ли гость
@@ -2161,7 +2367,6 @@ async def cmd_show_id(message: Message):
 # ---------- Панель администратора ----------
 
 @router.callback_query(F.data == "admin_active")
-@router.callback_query(F.data == "admin_active")
 async def cb_admin_active(cb: CallbackQuery):
     orders = await get_active_orders()
     if not orders:
@@ -2184,6 +2389,185 @@ async def cb_admin_active(cb: CallbackQuery):
             )
     await cb.message.answer(text, reply_markup=kb.admin_kb())
     await cb.answer()
+
+
+# ---------- Управление стоп-листом кухни (Задачи кухни) ----------
+
+async def _render_stop_list_view(target, edit: bool = True):
+    stop_list = await get_stop_list()
+    if not stop_list:
+        text = (
+            "⛔ <b>Стоп-лист кухни «ПивДонер»</b>\n\n"
+            "🟢 Сейчас на стопе <b>нет позиций</b>.\n"
+            "Все блюда меню и добавки доступны для заказа гостями!\n\n"
+            "Чтобы поставить блюдо или добавку на стоп, выберите кнопку ниже:"
+        )
+        markup = kb.admin_stop_menu_kb(has_stopped=False)
+    else:
+        text = f"⛔ <b>Текущий стоп-лист кухни ({len(stop_list)} поз.):</b>\n\n"
+        for item_id, info in stop_list.items():
+            name = info.get("item_name") or ITEMS.get(item_id, {}).get("name") or TOPPINGS_MAP.get(item_id, {}).get("name", item_id)
+            itype = "🌯 Блюдо" if info.get("item_type") == "dish" else "🧀 Добавка"
+            reason = info.get("reason", "Причина не указана")
+            dt = (info.get("created_at") or "")[:16].replace("T", " ")
+            text += f"• <b>{name}</b> ({itype})\n  Причина: <i>{reason}</i>\n  Поставлен: {dt}\n\n"
+        text += "<i>Гости видят эти позиции с пометкой (СТОП) и не могут их заказать.</i>"
+        markup = kb.admin_stop_menu_kb(has_stopped=True)
+
+    if edit and isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=markup)
+    elif isinstance(target, CallbackQuery):
+        await target.message.answer(text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
+
+
+@router.message(Command(commands=["stop", "stoplist"]))
+async def cmd_admin_stop(message: Message):
+    if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
+        await message.answer("⚠️ Данный раздел доступен только администраторам кухни.")
+        return
+    await _render_stop_list_view(message, edit=False)
+
+
+@router.callback_query(F.data.in_({"admin_stop_list", "stop_list_refresh"}))
+async def cb_admin_stop_list(cb: CallbackQuery):
+    await _render_stop_list_view(cb, edit=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "stop_add_dish")
+async def cb_stop_add_dish(cb: CallbackQuery):
+    stop_list = await get_stop_list()
+    await cb.message.edit_text(
+        "⛔ <b>Постановка БЛЮДА на стоп</b>\n\n"
+        "Выберите блюдо, которое закончилось или временно не готовится:",
+        reply_markup=kb.admin_stop_choose_dish_kb(stop_list),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "stop_add_top")
+async def cb_stop_add_top(cb: CallbackQuery):
+    stop_list = await get_stop_list()
+    await cb.message.edit_text(
+        "⛔ <b>Постановка ДОБАВКИ на стоп</b>\n\n"
+        "Выберите добавку к шаурме, которая закончилась:",
+        reply_markup=kb.admin_stop_choose_top_kb(stop_list),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("stop_pick:"))
+async def cb_stop_pick(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    itype = parts[1]
+    item_id = parts[2]
+    if itype == "dish":
+        name = ITEMS.get(item_id, {}).get("name", item_id)
+    else:
+        name = TOPPINGS_MAP.get(item_id, {}).get("name", item_id)
+
+    await cb.message.edit_text(
+        f"⛔ <b>Причина постановки на стоп</b>\n\n"
+        f"Позиция: <b>{name}</b>\n\n"
+        "Укажите причину для гостей и отчётов:",
+        reply_markup=kb.admin_stop_reason_kb(item_id),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("stop_set_r:"))
+async def cb_stop_set_reason(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    item_id = parts[1]
+    reason_code = parts[2]
+    itype = "top" if item_id in TOPPINGS_MAP else "dish"
+    name = TOPPINGS_MAP[item_id]["name"] if itype == "top" else ITEMS.get(item_id, {}).get("name", item_id)
+
+    if reason_code == "custom":
+        await state.set_state(AdminStopForm.waiting_for_reason)
+        await state.update_data(stop_item_id=item_id, stop_item_type=itype, stop_item_name=name)
+        await cb.message.edit_text(
+            f"✍️ <b>Введите свою причину постановки на стоп</b> для позиции <b>{name}</b>:\n\n"
+            "Напишите текст причины ответным сообщением (гость увидит его при попытке заказать):",
+            reply_markup=kb.cancel_reply_kb(),
+        )
+        await cb.answer()
+        return
+
+    reason = STOP_REASONS.get(reason_code, "Временно закончилось на кухне")
+    await add_to_stop_list(item_id=item_id, item_name=name, item_type=itype, reason=reason)
+
+    await cb.message.edit_text(
+        f"✅ <b>Позиция поставлена на стоп!</b>\n\n"
+        f"⛔ <b>{name}</b>\n"
+        f"💬 Причина: <i>{reason}</i>\n\n"
+        "Гости увидят предупреждение с этой причиной и не смогут сделать заказ.",
+        reply_markup=kb.admin_stop_menu_kb(has_stopped=True),
+    )
+    await cb.answer("Позиция на стопе")
+
+
+@router.message(AdminStopForm.waiting_for_reason, F.text)
+async def admin_got_stop_reason(message: Message, state: FSMContext):
+    if message.text.strip() == "❌ Отмена":
+        await state.clear()
+        await state.set_state(OrderForm.browsing)
+        await message.answer("Постановка на стоп отменена.", reply_markup=kb.admin_kb())
+        return
+
+    custom_reason = message.text.strip()
+    data = await state.get_data()
+    item_id = data.get("stop_item_id")
+    itype = data.get("stop_item_type", "dish")
+    name = data.get("stop_item_name") or (TOPPINGS_MAP[item_id]["name"] if itype == "top" else ITEMS.get(item_id, {}).get("name", item_id))
+
+    await add_to_stop_list(item_id=item_id, item_name=name, item_type=itype, reason=custom_reason)
+    await state.clear()
+    await state.set_state(OrderForm.browsing)
+
+    await message.answer(
+        f"✅ <b>Позиция поставлена на стоп!</b>\n\n"
+        f"⛔ <b>{name}</b>\n"
+        f"💬 Причина: <i>{custom_reason}</i>\n\n"
+        "Гости увидят предупреждение с этой причиной и не смогут сделать заказ.",
+        reply_markup=kb.admin_stop_menu_kb(has_stopped=True),
+    )
+
+
+@router.callback_query(F.data == "stop_unstop_menu")
+async def cb_stop_unstop_menu(cb: CallbackQuery):
+    stop_list = await get_stop_list()
+    if not stop_list:
+        await cb.message.edit_text(
+            "🟢 Сейчас на стопе нет позиций.",
+            reply_markup=kb.admin_stop_menu_kb(has_stopped=False),
+        )
+        await cb.answer()
+        return
+
+    await cb.message.edit_text(
+        "🟢 <b>Снятие со стопа</b>\n\n"
+        "Нажмите на позицию, которую хотите вернуть в продажу:",
+        reply_markup=kb.admin_stop_unstop_kb(stop_list),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("stop_unstop_do:"))
+async def cb_stop_unstop_do(cb: CallbackQuery):
+    item_id = cb.data.split(":", 1)[1]
+    name = TOPPINGS_MAP.get(item_id, {}).get("name") or ITEMS.get(item_id, {}).get("name", item_id)
+    await remove_from_stop_list(item_id)
+    stop_list = await get_stop_list()
+
+    await cb.message.edit_text(
+        f"🟢 <b>Позиция возвращена в продажу!</b>\n\n"
+        f"«<b>{name}</b>» снова доступна для заказа гостями в меню.",
+        reply_markup=kb.admin_stop_menu_kb(has_stopped=bool(stop_list)),
+    )
+    await cb.answer("Снято со стопа")
 
 
 @router.callback_query(F.data == "admin_help")
