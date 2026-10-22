@@ -11,21 +11,24 @@ from config import WEBAPP_URL
 from menu import ITEMS, MENU, TOPPINGS, fmt_price, parse_cart_item
 
 
-def main_menu(user_or_admin=None) -> ReplyKeyboardMarkup:
-    """Постоянная панель быстрых действий (кнопки под строкой ввода)."""
-    is_admin = False
-    if isinstance(user_or_admin, bool):
-        is_admin = user_or_admin
-    elif isinstance(user_or_admin, int):
-        from config import ADMIN_IDS, DEMO_MODE
-        is_admin = DEMO_MODE or (user_or_admin in ADMIN_IDS)
-    elif user_or_admin is not None:
-        try:
-            from config import ADMIN_IDS, DEMO_MODE
-            is_admin = DEMO_MODE or (int(user_or_admin) in ADMIN_IDS)
-        except Exception:
-            is_admin = False
+def admin_reply_menu() -> ReplyKeyboardMarkup:
+    """Панель администратора (под строкой ввода) — ТОЛЬКО управление заведением, без кнопок гостя."""
+    buttons = [
+        [KeyboardButton(text="⚙️ Панель администратора"), KeyboardButton(text="ℹ️ Информация о заведении")],
+        [KeyboardButton(text="📋 Активные заказы"), KeyboardButton(text="⛔ Стоп-лист кухни")],
+        [KeyboardButton(text="📊 Отчёт за сегодня"), KeyboardButton(text="📑 Экспорт в Excel")],
+        [KeyboardButton(text="📢 Сделать рассылку"), KeyboardButton(text="🔍 Поиск заказов по номеру")],
+        [KeyboardButton(text="📖 Инструкция к боту")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=buttons,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
+
+def guest_reply_menu() -> ReplyKeyboardMarkup:
+    """Панель гостя под строкой ввода."""
     buttons = [
         [KeyboardButton(text="🛒 Оформить заказ")],
         [KeyboardButton(text="🍔 Меню"), KeyboardButton(text="🧺 Корзина")],
@@ -33,16 +36,35 @@ def main_menu(user_or_admin=None) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="📍 Адрес и инфо"), KeyboardButton(text="🎲 Игра с бонусами")],
         [KeyboardButton(text="🚨 Подать жалобу")],
     ]
-    if is_admin:
-        buttons.append([
-            KeyboardButton(text="📢 Сделать рассылку"),
-            KeyboardButton(text="⚙️ Панель администратора"),
-        ])
     return ReplyKeyboardMarkup(
         keyboard=buttons,
         resize_keyboard=True,
         is_persistent=True,
     )
+
+
+def main_menu(user_or_admin=None) -> ReplyKeyboardMarkup:
+    """Возвращает панель администратора для админов/группы, либо панель гостя для клиентов."""
+    is_admin = False
+    if isinstance(user_or_admin, bool):
+        is_admin = user_or_admin
+    elif isinstance(user_or_admin, int):
+        from config import ADMIN_IDS, DEMO_MODE, MANAGER_CHAT_ID
+        is_admin = DEMO_MODE or (user_or_admin in ADMIN_IDS) or (user_or_admin == MANAGER_CHAT_ID)
+    elif user_or_admin is not None:
+        try:
+            from config import ADMIN_IDS, DEMO_MODE, MANAGER_CHAT_ID
+            uid = int(user_or_admin)
+            is_admin = DEMO_MODE or (uid in ADMIN_IDS) or (uid == MANAGER_CHAT_ID)
+        except Exception:
+            is_admin = False
+    else:
+        from config import DEMO_MODE
+        is_admin = DEMO_MODE
+
+    if is_admin:
+        return admin_reply_menu()
+    return guest_reply_menu()
 
 
 def phone_request_kb() -> ReplyKeyboardMarkup:
@@ -384,7 +406,14 @@ def after_order_kb() -> InlineKeyboardMarkup:
 
 def admin_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="🔍 Поиск заказов по номеру", callback_data="admin_search_phone"))
+    kb.row(
+        InlineKeyboardButton(text="ℹ️ Информация о заведении", callback_data="admin_cafe_info"),
+        InlineKeyboardButton(text="🔍 Поиск по номеру", callback_data="admin_search_phone"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="📋 Активные заказы", callback_data="admin_active"),
+        InlineKeyboardButton(text="⛔ Стоп-лист кухни", callback_data="admin_stop_list"),
+    )
     kb.row(
         InlineKeyboardButton(text="📊 Отчёт за сегодня", callback_data="admin_report"),
         InlineKeyboardButton(text="⭐ Рейтинг и отзывы", callback_data="admin_reviews_stats"),
@@ -393,11 +422,21 @@ def admin_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📢 Сделать рассылку", callback_data="admin_broadcast"),
         InlineKeyboardButton(text="📑 Экспорт в Excel", callback_data="admin_export_excel"),
     )
+    kb.row(InlineKeyboardButton(text="📖 Инструкция к боту", callback_data="admin_help"))
+    return kb.as_markup()
+
+
+def admin_cafe_info_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="📋 Активные заказы", callback_data="admin_active"),
+        InlineKeyboardButton(text="🔄 Обновить сводку", callback_data="admin_cafe_info"),
         InlineKeyboardButton(text="⛔ Стоп-лист кухни", callback_data="admin_stop_list"),
     )
-    kb.row(InlineKeyboardButton(text="📖 Инструкция", callback_data="admin_help"))
+    kb.row(
+        InlineKeyboardButton(text="📋 Активные заказы", callback_data="admin_active"),
+        InlineKeyboardButton(text="📊 Отчёт за сегодня", callback_data="admin_report"),
+    )
+    kb.row(InlineKeyboardButton(text="⚙️ Панель администратора", callback_data="admin_menu"))
     return kb.as_markup()
 
 

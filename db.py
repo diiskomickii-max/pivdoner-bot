@@ -555,3 +555,56 @@ async def get_item_stop_info(item_id: str) -> dict | None:
     """Проверяет, находится ли позиция на стопе. Возвращает dict с причиной или None."""
     sl = await get_stop_list()
     return sl.get(item_id)
+
+
+async def get_establishment_dashboard():
+    """Сводная статистика заведения за сегодня: принятые, отменённые, активные, выручка."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT id, status, payment, total, cancellation_reason, delivery_type, created_at 
+               FROM orders WHERE created_at LIKE ? ORDER BY id DESC""",
+            (f"{today}%",),
+        )
+        rows = await cur.fetchall()
+
+        status_counts = {
+            "new": 0,
+            "accepted": 0,
+            "cooking": 0,
+            "ready": 0,
+            "to_courier": 0,
+            "completed": 0,
+            "cancelled": 0,
+        }
+        total_revenue = 0.0
+        cancelled_reasons = []
+        paid_online = 0
+        paid_cash = 0
+
+        for r in rows:
+            st = r["status"]
+            if st in status_counts:
+                status_counts[st] += 1
+            if st != "cancelled":
+                total_revenue += float(r["total"] or 0.0)
+                if r["payment"] in ("paid", "yandex_online"):
+                    paid_online += 1
+                elif r["payment"] == "cash":
+                    paid_cash += 1
+            else:
+                reason = r["cancellation_reason"] or "Причина не указана"
+                cancelled_reasons.append(reason)
+
+        return {
+            "total_today_orders": len(rows),
+            "status_counts": status_counts,
+            "total_revenue": total_revenue,
+            "cancelled_count": status_counts["cancelled"],
+            "cancelled_reasons": cancelled_reasons,
+            "accepted_total": status_counts["accepted"] + status_counts["cooking"] + status_counts["ready"] + status_counts["to_courier"] + status_counts["completed"],
+            "active_now": status_counts["new"] + status_counts["accepted"] + status_counts["cooking"] + status_counts["ready"] + status_counts["to_courier"],
+            "paid_online": paid_online,
+            "paid_cash": paid_cash,
+        }
