@@ -447,6 +447,12 @@ def admin_search_again_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def admin_cancel_search_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отменить поиск", callback_data="admin_cancel_search"))
+    return kb.as_markup()
+
+
 def broadcast_confirm_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="📢 Да, отправить всем", callback_data="broadcast:send"))

@@ -2727,7 +2727,7 @@ async def msg_search_phone_btn(message: Message, state: FSMContext, bot: Bot):
         message.chat.id,
         "🔍 <b>Поиск истории заказов гостя по номеру телефона</b>\n\n"
         "Введите номер телефона гостя (например: <code>+375 29 123-45-67</code> или фрагмент номера):",
-        reply_markup=kb.cancel_reply_kb(),
+        reply_markup=kb.admin_cancel_search_kb(),
     )
 
 
@@ -2735,7 +2735,6 @@ async def msg_search_phone_btn(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data == "admin_search_phone")
 async def cb_admin_search_phone(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    await delete(cb.message)
     await state.set_state(AdminSearchForm.waiting_for_phone)
     await send_step_msg(
         state,
@@ -2743,9 +2742,18 @@ async def cb_admin_search_phone(cb: CallbackQuery, state: FSMContext, bot: Bot):
         cb.message.chat.id,
         "🔍 <b>Поиск истории заказов гостя по номеру телефона</b>\n\n"
         "Введите номер телефона гостя (например: <code>+375 29 123-45-67</code> или фрагмент номера):",
-        reply_markup=kb.cancel_reply_kb(),
+        reply_markup=kb.admin_cancel_search_kb(),
     )
     await cb.answer()
+
+
+@router.callback_query(F.data == "admin_cancel_search")
+async def cb_admin_cancel_search(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    await cleanup_step_msg(state, bot, cb.message.chat.id)
+    await state.clear()
+    await state.set_state(OrderForm.browsing)
+    await delete(cb.message)
+    await cb.answer("Поиск отменён.")
 
 
 @router.callback_query(F.data == "admin_menu")
@@ -2756,14 +2764,51 @@ async def cb_admin_menu(cb: CallbackQuery):
 
 @router.message(AdminSearchForm.waiting_for_phone, F.text)
 async def admin_got_phone_search(message: Message, state: FSMContext, bot: Bot):
-    await delete(message)
-    if message.text.strip() == "❌ Отмена":
+    if message.text.strip() in ("❌ Отмена", "/cancel", "Отмена", "❌ Отменить поиск"):
         await cleanup_step_msg(state, bot, message.chat.id)
         await state.clear()
         await state.set_state(OrderForm.browsing)
-        await message.answer("Поиск отменён.", reply_markup=kb.main_menu())
+        await message.answer("Поиск отменён.", reply_markup=kb.admin_reply_menu())
         return
 
+    query = message.text.strip()
+    await cleanup_step_msg(state, bot, message.chat.id)
+    await state.clear()
+    await state.set_state(OrderForm.browsing)
+    await _show_admin_search_results(message.chat.id, bot, query)
+
+
+@router.message(AdminSearchForm.waiting_for_phone, F.contact)
+async def admin_got_contact_search(message: Message, state: FSMContext, bot: Bot):
+    query = message.contact.phone_number
+    await cleanup_step_msg(state, bot, message.chat.id)
+    await state.clear()
+    await state.set_state(OrderForm.browsing)
+    await _show_admin_search_results(message.chat.id, bot, query)
+
+
+def is_phone_number_query(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if t.startswith("/"):
+        return False
+    menu_keywords = ["панель", "информация", "активные", "стоп-лист", "отчёт", "экспорт", "рассылк", "поиск", "инструкция", "меню", "корзина", "отмена", "кафе", "доставка"]
+    t_lower = t.lower()
+    if any(k in t_lower for k in menu_keywords):
+        return False
+    clean = re.sub(r"[\s\-\(\)\+\.]", "", t)
+    if not clean.isdigit():
+        return False
+    return 7 <= len(clean) <= 13
+
+
+@router.message(F.text.func(is_phone_number_query))
+async def msg_admin_any_phone(message: Message, state: FSMContext, bot: Bot):
+    is_admin = is_admin_user(message.from_user.id)
+    is_group = (message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID)
+    if not is_admin and not is_group:
+        return
     query = message.text.strip()
     await cleanup_step_msg(state, bot, message.chat.id)
     await state.clear()
@@ -2787,7 +2832,7 @@ async def cmd_find(message: Message, state: FSMContext, bot: Bot):
             bot,
             message.chat.id,
             "🔍 Введите номер телефона гостя для поиска истории заказов:",
-            reply_markup=kb.cancel_reply_kb(),
+            reply_markup=kb.admin_cancel_search_kb(),
         )
 
 
