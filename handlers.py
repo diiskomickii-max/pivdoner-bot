@@ -39,6 +39,7 @@ from db import (
     get_all_orders_for_export,
     get_all_users,
     get_broadcast_consent,
+    get_establishment_dashboard,
     get_item_stop_info,
     get_order,
     get_order_status,
@@ -267,42 +268,37 @@ def is_user_verified(user) -> bool:
 # ---------- Старт и Регистрация (Задача 4) ----------
 
 INSTRUCTION_TEXT = (
-    "📌 <b>РУКОВОДСТВО И ВОЗМОЖНОСТИ БОТА «ПИВДОНЕР PRO»</b>\n"
-    "<i>(Полный комплект функций для покупателя и владельца заведения)</i>\n\n"
+    "📌 <b>АКТУАЛЬНАЯ ИНСТРУКЦИЯ И РАБОЧИЙ РЕЖИМ «ПИВДОНЕР PRO»</b>\n"
+    "<i>(Служебная панель администратора заведения и управления кухней)</i>\n\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "🍔 <b>1. ИНТЕРФЕЙС ГОСТЯ (КЛИЕНТА):</b>\n\n"
-    "• <b>«🚀 Меню в Mini App»</b> — современная визуальная Web App витрина прямо внутри Telegram с фотографиями блюд, бейджами («Хит», «Острое»), ингредиентами и плавающей корзиной.\n"
-    "• <b>«🍔 Меню» / «🛒 Оформить заказ»</b> — классический кнопочный каталог по разделам (Донеры, Хот-доги, Ланчбоксы, Закуски, Напитки) с <b>подробным составом ингредиентов с гриля</b>, весом и кнопками «➕ / ➖».\n"
-    "• <b>«🧺 Корзина»</b> — список блюд, подсчёт суммы и чекаут.\n"
-    "• <b>«🚕 Яндекс Доставка» / «🏃 Самовывоз»</b>:\n"
-    "  - <i>Яндекс Доставка:</i> авто-расчёт тарифа Яндекс Go (бесплатно от 35 Br, иначе 5 Br), ввод адреса или кнопка «📍 Отправить геопозицию», трекинг времени (~35–45 мин).\n"
-    "  - <i>Самовывоз:</i> выбор времени готовности.\n"
-    "• <b>«👤 Личный кабинет»</b> — верифицированный телефон, баланс бонусов, статистика всех покупок.\n"
-    "• <b>«📜 Мои заказы»</b> — история с детализацией (доставка курьером / самовывоз, дата, сумма).\n"
-    "• <b>«🚨 Подать жалобу»</b> — быстрая связь с директором (текст и фото проблемы).\n"
-    "• <b>«📍 Адрес и инфо»</b> — часы работы, координаты на карте, контакты.\n\n"
+    "👨‍🍳 <b>1. СЛУЖЕБНЫЕ ФУНКЦИИ АДМИНИСТРАТОРА:</b>\n\n"
+    "• <b>ℹ️ Информация о заведении</b> — полная оперативная сводка смены в реальном времени: название и адрес кафе, текущий стоп-лист, число принятых и отменённых заказов, выручка, новости заведения.\n"
+    "• <b>⛔ Стоп-лист кухни (/stop)</b> — постановка любого блюда или добавки в шаурму на стоп с фиксацией обязательной причины (закончились ингредиенты, задержка поставщика, сбой оборудования). Клиенты не могут заказать позицию и видят вежливое объяснение.\n"
+    "• <b>📋 Активные заказы (/active)</b> — список всех заказов, которые готовятся на кухне или переданы курьеру Яндекс Go.\n"
+    "• <b>📊 Отчёт за смену (/report)</b> — финансовый отчёт по выручке, числу заказов и топ-позициям за день.\n"
+    "• <b>📑 Экспорт в Excel (/excel)</b> — скачивание детализированного файла .xlsx со всеми заказами, адресами доставки и суммами.\n"
+    "• <b>📢 Таргетированная рассылка</b> — моментальная отправка акций и спецпредложений всем гостям с фото и текстом.\n"
+    "• <b>🔍 Поиск по номеру (/search)</b> — поиск истории заказов и среднего чека гостя по номеру телефона.\n"
+    "• <b>⭐ Рейтинг и отзывы</b> — статистика оценок NPS гостей (1-5 ⭐) с авто-начислением бонусов за отзывы на Яндекс Картах.\n\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "👨‍🍳 <b>2. УПРАВЛЕНИЕ КУХНЕЙ И АДМИНИСТРАТОР:</b>\n\n"
-    "• <b>Интерактивная карточка заказа:</b> «✅ Принять заказ» → «🔥 Начать готовить» → «🛍 Заказ готов!» → «🏁 Выдан гостю / Завершить».\n"
-    "• <b>🖨 Печать чека на термопринтер (58/80 мм):</b> мгновенная генерация макета кухонного чека с реквизитами, составом, суммами и отправкой файла ESC/POS команд.\n"
-    "• <b>📑 Выгрузка в Excel (.xlsx):</b> скачивание красивой таблицы со всеми заказами, выручкой, адресами и формулами.\n"
-    "• <b>📢 Таргетированная рассылка:</b> отправка акций и спецпредложений с фото и текстом всем гостям.\n"
-    "• <b>🔍 Поиск по номеру телефона:</b> полная история заказов любого клиента.\n"
-    "• <b>📊 Отчёт за смену:</b> кассовый отчёт по выручке, числу заказов и топ-блюдам.\n\n"
+    "🛎 <b>2. КАРТОЧКА ЗАКАЗА НА КУХНЕ:</b>\n\n"
+    "Каждый заказ поступает в группу с интерактивными кнопками смены статуса:\n"
+    "• <b>[✅ Принять]</b> → повара уведомлены, включается поиск машины Яндекс Доставки.\n"
+    "• <b>[🔥 Готовится]</b> → клиент видит уведомление, что блюда на гриле.\n"
+    "• <b>[🛍 Готов к выдаче]</b> → заказ упакован в крафт-пакет и ждёт гостя или курьера.\n"
+    "• <b>[🏁 Выдан гостю]</b> → завершение заказа, спустя 20 мин клиенту придёт опрос качества.\n"
+    "• <b>[❌ Отменить заказ]</b> → обязательный выбор причины отмены с уведомлением клиента.\n"
+    "• <b>[🖨 Печать чека]</b> → термопечать кухонного чека 58/80 мм на ESC/POS принтер.\n\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "⭐ <b>3. РЕПУТАЦИЯ И ОТЗЫВЫ (NPS):</b>\n"
-    "• После выдачи/доставки бот автоматически спрашивает оценку 1–5 ⭐:\n"
-    "  - При <b>4-5 ⭐</b> — мотивирует оставить отзыв на <b>Яндекс Картах</b> с начислением <b>+2.00 Br бонусов</b>.\n"
-    "  - При <b>1-3 ⭐</b> — перехватывает негатив и моментально пересылает жалобу директору для урегулирования.\n\n"
-    "━━━━━━━━━━━━━━━━━━━\n"
-    "🚕 <b>4. СИМУЛЯЦИЯ ЯНДЕКС ДОСТАВКИ:</b>\n"
-    "Полный цикл: поиск курьера → назначение (авто, госномер, рейтинг) → прибытие в кафе → еда в термосумке → вручение у подъезда.\n\n"
-    "👇 <i>Сообщение закреплено вверху чата. Нажмите кнопки ниже для проверки всех функций!</i>"
+    "🔒 <b>3. СТРОГОЕ РАЗДЕЛЕНИЕ ЧАТОВ:</b>\n\n"
+    "• <b>В группе «Заказы ПивДонер»</b> отключены все кнопки гостя (оформить заказ, меню, корзина). Доступна ТОЛЬКО служебная панель администратора.\n"
+    "• <b>В личном чате с ботом</b> гости оформляют предзаказы, выбирают самовывоз или Яндекс Доставку и копят бонусы.\n\n"
+    "👇 <i>Используйте кнопки под строкой ввода и интерактивную панель ниже для управления:</i>"
 )
 
 
 async def send_and_pin_instruction(chat_id: int, bot: Bot, reply_markup=None):
-    """Отправляет подробную инструкцию покупателя/администратора и закрепляет её в чате."""
+    """Отправляет актуальную инструкцию администратора/кухни и закрепляет её в чате."""
     markup = reply_markup or kb.admin_kb()
     msg = await bot.send_message(chat_id, INSTRUCTION_TEXT, reply_markup=markup)
     try:
@@ -317,20 +313,28 @@ async def send_main_greeting(message: Message, name: str, bot: Bot = None):
     b = bot or message.bot
     uid = message.from_user.id if message.from_user else 0
     is_admin = is_admin_user(uid)
-    admin_note = (
-        "\n\n⚙️ <i>Вы авторизованы как администратор. Кнопки управления кафе доступны на панели внизу. Все подтверждённые заказы поступают в группу кухни.</i>"
-        if is_admin
-        else ""
-    )
+
+    if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID or is_admin:
+        # Для администратора или группы кухни: ТОЛЬКО панель администратора! Без кнопок гостя!
+        await message.answer(
+            f"⚙️ <b>Панель администратора «{CAFE['name']}»</b>\n\n"
+            f"👤 Авторизован: <b>{name}</b> (Администратор)\n"
+            "Все кнопки гостя скрыты. Вам доступно только управление кухней, стоп-листом и заказами.",
+            reply_markup=kb.admin_reply_menu(),
+        )
+        await message.answer("Панель быстрого доступа:", reply_markup=kb.admin_kb())
+        await send_and_pin_instruction(message.chat.id, b)
+        return
+
+    # Для обычного гостя:
     await message.answer(
         f"👋 Привет, {name}!\n\n"
         f"Это <b>{CAFE['name']}</b> — донеры, ланчбоксы и хот-доги без очереди и ожидания.\n\n"
         "🛒 Сделай предзаказ — и к твоему приезду всё будет готово.\n"
         "🕐 Забери к выбранному времени по адресу:\n"
         f"📍 {CAFE['address']}\n"
-        f"📞 {CAFE['phone']}"
-        + admin_note,
-        reply_markup=kb.main_menu(user_or_admin=uid),
+        f"📞 {CAFE['phone']}",
+        reply_markup=kb.guest_reply_menu(),
     )
     await message.answer("Быстрые действия:", reply_markup=kb.quick_actions_kb())
     if DEMO_MODE:
@@ -343,7 +347,8 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
         await message.reply(
             "👨‍🍳 <b>Группа кухни «ПивДонер» активна!</b>\n\n"
             "Сюда поступают подтверждённые заказы.\n"
-            "Команды администратора: /stop, /active, /report, /excel, /id, /help"
+            "Панель администратора закреплена. Для управления используйте кнопки под строкой ввода.",
+            reply_markup=kb.admin_reply_menu(),
         )
         return
 
@@ -917,8 +922,7 @@ async def show_history(chat_id: int, user_id: int, bot: Bot, state: FSMContext =
         await bot.send_message(chat_id, text, reply_markup=kb_markup)
 
 
-@router.message(Command("info"))
-@router.message(F.text.in_({"📍 Адрес и инфо", "📍 Адрес и время работы", "/info"}))
+@router.message(F.text.in_({"📍 Адрес и инфо", "📍 Адрес и время работы"}))
 async def cafe_info_msg(message: Message):
     if message.chat.type in ('group', 'supergroup') or message.chat.id == MANAGER_CHAT_ID:
         return
@@ -2314,6 +2318,7 @@ async def cb_payok(cb: CallbackQuery, bot: Bot):
 
 
 @router.message(Command(commands=["active", "orders"]))
+@router.message(F.text.in_({"📋 Активные заказы", "Активные заказы"}))
 async def cmd_group_active(message: Message):
     orders = await get_active_orders()
     if not orders:
@@ -2332,6 +2337,8 @@ async def cmd_group_active(message: Message):
             f"🛒 {o.get('items', '')}\n\n"
         )
     await message.answer(text)
+
+
 @router.message(Command("report"))
 async def cmd_group_report(message: Message):
     text = await _report_text()
@@ -2339,6 +2346,7 @@ async def cmd_group_report(message: Message):
 
 
 @router.message(Command("excel"))
+@router.message(F.text.in_({"📑 Экспорт в Excel", "Экспорт в Excel"}))
 async def cmd_group_excel(message: Message, bot: Bot):
     try:
         from excel_report import generate_excel_report
@@ -2423,6 +2431,7 @@ async def _render_stop_list_view(target, edit: bool = True):
 
 
 @router.message(Command(commands=["stop", "stoplist"]))
+@router.message(F.text.in_({"⛔ Стоп-лист кухни", "Стоп-лист кухни", "Стоп-лист"}))
 async def cmd_admin_stop(message: Message):
     if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
         await message.answer("⚠️ Данный раздел доступен только администраторам кухни.")
@@ -2570,6 +2579,79 @@ async def cb_stop_unstop_do(cb: CallbackQuery):
     await cb.answer("Снято со стопа")
 
 
+# ---------- Информация о заведении и оперативная сводка ----------
+
+async def make_establishment_info_text() -> str:
+    stats = await get_establishment_dashboard()
+    stop_list = await get_stop_list()
+
+    st_cnt = stats["status_counts"]
+    accepted_all = stats["accepted_total"]
+    cancelled_cnt = stats["cancelled_count"]
+
+    if not stop_list:
+        stop_str = "🟢 <b>Стоп-лист кухни пуст</b> — все блюда и ингредиенты в наличии!"
+    else:
+        stop_lines = []
+        for iid, info in list(stop_list.items())[:6]:
+            name = info.get("item_name", iid)
+            reason = info.get("reason", "Закончилось на кухне")
+            stop_lines.append(f"• ⛔ <b>{name}</b> (<i>{reason}</i>)")
+        if len(stop_list) > 6:
+            stop_lines.append(f"<i>...и ещё {len(stop_list) - 6} позиций</i>")
+        stop_str = "\n".join(stop_lines)
+
+    cancel_info_str = f"• ❌ <b>Отменённых заказов: {cancelled_cnt} шт.</b>"
+    if stats["cancelled_reasons"]:
+        reason_counts = {}
+        for r in stats["cancelled_reasons"]:
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+        reasons_list = [f"{k}: {v}" for k, v in reason_counts.items()]
+        cancel_info_str += f"\n  └ <i>Причины: {', '.join(reasons_list)}</i>"
+
+    text = (
+        f"ℹ️ <b>ОПЕРАТИВНАЯ СВОДКА И ИНФОРМАЦИЯ О ЗАВЕДЕНИИ</b>\n\n"
+        f"🏪 <b>Кафе:</b> «{CAFE['name']}» (быстрое питание, донеры на гриле)\n"
+        f"📍 <b>Адрес кафе:</b> {CAFE['address']}\n"
+        f"🕐 <b>Время работы кухни:</b> {CAFE['hours']}\n"
+        f"📞 <b>Контакты заведения:</b> {CAFE['phone']}\n"
+        f"🟢 <b>Статус заведения:</b> Кухня открыта и принимает предзаказы\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>АКТУАЛЬНАЯ СТАТИСТИКА ЗА СЕГОДНЯ:</b>\n"
+        f"• 📥 Всего заказов за смену: <b>{stats['total_today_orders']} шт.</b>\n"
+        f"• ✅ <b>Принятых заказов: {accepted_all} шт.</b>\n"
+        f"  └ 🔥 Готовятся / готовы: <b>{st_cnt['cooking'] + st_cnt['ready'] + st_cnt['to_courier']} шт.</b>\n"
+        f"  └ 🏁 Выдано клиентам: <b>{st_cnt['completed']} шт.</b>\n"
+        f"{cancel_info_str}\n"
+        f"• 💰 <b>Выручка за сегодня: {stats['total_revenue']:.2f} Br</b>\n"
+        f"  └ 💳 Онлайн: {stats['paid_online']} | 💵 На месте: {stats['paid_cash']}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"⛔ <b>АКТУАЛЬНЫЙ СТОП-ЛИСТ КУХНИ ({len(stop_list)} поз.):</b>\n"
+        f"{stop_str}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>АКТУАЛЬНЫЕ НОВОСТИ ЗАВЕДЕНИЯ:</b>\n"
+        f"• Панель администратора переведена в строгий режим управления.\n"
+        f"• Все кнопки гостя скрыты из панели администратора.\n"
+        f"• Контроль стоп-листа с фиксацией причин в режиме реального времени.\n"
+        f"• Автоматическая печать кухонных чеков и выгрузка Excel-отчётов активны."
+    )
+    return text
+
+
+@router.message(Command(commands=["info", "status", "dashboard", "cafe"]))
+@router.message(F.text.contains("Информация о заведении"))
+@router.message(F.text.in_({"ℹ️ Информация о заведении", "Информация о заведении", "ℹ️ Информация", "/cafe", "/dashboard"}))
+@router.callback_query(F.data == "admin_cafe_info")
+async def show_establishment_info(event: Message | CallbackQuery):
+    text = await make_establishment_info_text()
+    markup = kb.admin_cafe_info_kb()
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, reply_markup=markup)
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=markup)
+
+
 @router.callback_query(F.data == "admin_help")
 async def cb_admin_help(cb: CallbackQuery, bot: Bot):
     await delete(cb.message)
@@ -2577,7 +2659,7 @@ async def cb_admin_help(cb: CallbackQuery, bot: Bot):
     await cb.answer("Инструкция закреплена")
 
 
-@router.message(F.text.in_({"📖 Инструкция", "📖 Инструкция к боту", "Инструкция", "/instruction", "/guide"}))
+@router.message(F.text.in_({"📖 Инструкция", "📖 Инструкция к боту", "Инструкция к боту", "Инструкция", "/instruction", "/guide"}))
 async def msg_instruction(message: Message, bot: Bot):
     await delete(message)
     await send_and_pin_instruction(message.chat.id, bot)
@@ -2617,17 +2699,36 @@ async def cb_admin_report(cb: CallbackQuery):
 
 
 @router.message(Command("report"))
+@router.message(F.text.in_({"📊 Отчёт за сегодня", "Отчёт за сегодня"}))
 async def cmd_report(message: Message):
     await message.answer(await _report_text(), reply_markup=kb.admin_kb())
 
 
-@router.message(F.text.in_({"⚙️ Панель администратора", "/admin"}))
+@router.message(F.text.in_({"⚙️ Панель администратора", "Панель администратора", "/admin"}))
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
         await message.answer("⚠️ Данный раздел доступен только администраторам кафе.")
         return
-    await message.answer("⚙️ <b>Панель администратора</b>", reply_markup=kb.admin_kb())
+    await message.answer(
+        "⚙️ <b>Панель администратора кафе «ПивДонер»</b>\n\n"
+        "Выберите раздел для управления кухней и заказами:",
+        reply_markup=kb.admin_reply_menu(),
+    )
+    await message.answer("Панель быстрого доступа:", reply_markup=kb.admin_kb())
+
+
+@router.message(F.text.in_({"🔍 Поиск заказов по номеру", "Поиск заказов по номеру", "Поиск по номеру"}))
+async def msg_search_phone_btn(message: Message, state: FSMContext, bot: Bot):
+    await state.set_state(AdminSearchForm.waiting_for_phone)
+    await send_step_msg(
+        state,
+        bot,
+        message.chat.id,
+        "🔍 <b>Поиск истории заказов гостя по номеру телефона</b>\n\n"
+        "Введите номер телефона гостя (например: <code>+375 29 123-45-67</code> или фрагмент номера):",
+        reply_markup=kb.cancel_reply_kb(),
+    )
 
 
 # ---------- Поиск заказов по номеру телефона для администратора ----------
