@@ -1,34 +1,35 @@
-"""Модуль интеграции и симуляции Яндекс Доставки (Yandex Go Delivery) для кафе «ПивДонер».
-
-Имитирует:
-1. Расчёт стоимости и времени доставки Яндекс Go по Минску.
-2. Жизненный цикл доставки:
-   - Поиск курьера
-   - Назначение курьера (автомобиль, госномер, имя)
-   - Прибытие в кафе за заказом
-   - Доставка по маршруту (в пути с термосумкой)
-   - Прибытие к подъезду клиента
-   - Завершение доставки
 """
-
+Интеграция с Яндекс Доставкой (Yandex Go Delivery) для кафе «ПивДонер».
+Реализует расчёт тарифов, симуляцию курьера и отслеживание статуса доставки.
+"""
 import asyncio
 import logging
 import random
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 from aiogram import Bot
-from db import get_order, set_order_status
+
+from db import set_order_status, get_order
 
 COURIERS = [
-    {"name": "Александр", "car": "Белый Hyundai Solaris", "plate": "7788-7", "rating": "4.98"},
-    {"name": "Дмитрий", "car": "Серый Skoda Rapid", "plate": "1234-7", "rating": "4.95"},
-    {"name": "Максим", "car": "Чёрный Volkswagen Polo", "plate": "9941-7", "rating": "4.99"},
-    {"name": "Артём", "car": "Серебристый Kia Rio", "plate": "3456-7", "rating": "4.92"},
+    {"name": "Артём", "phone": "+375 29 332-11-22", "car": "Серебристый Kia Rio", "plate": "3456-7", "rating": "4.95"},
+    {"name": "Максим", "phone": "+375 33 665-44-33", "car": "Белый Volkswagen Polo", "plate": "7712-7", "rating": "4.98"},
+    {"name": "Дмитрий", "phone": "+375 44 554-33-22", "car": "Серый Hyundai Accent", "plate": "5501-7", "rating": "4.92"},
+    {"name": "Александр", "phone": "+375 29 881-22-33", "car": "Синий Renault Logan", "plate": "9934-7", "rating": "4.89"},
 ]
+
+ACTIVE_DELIVERY_TASKS: Dict[int, asyncio.Task] = {}
+
+
+def cancel_delivery_simulation(order_id: int):
+    """Немедленно останавливает симуляцию доставки при отмене заказа."""
+    task = ACTIVE_DELIVERY_TASKS.pop(order_id, None)
+    if task and not task.done():
+        task.cancel()
+        logging.info("Симуляция доставки для заказа #%s успешно отменена.", order_id)
 
 
 def calculate_yandex_delivery(address: str, cart_total: float) -> Dict[str, Any]:
-    """Расчёт тарифа Яндекс Доставки."""
-    # Бесплатная доставка от 35 Br, иначе фиксированный удобный тариф 5.00 Br
+    """Расчёт тарифа доставки."""
     if cart_total >= 35.0:
         cost = 0.0
         is_free = True
@@ -59,14 +60,23 @@ async def run_yandex_delivery_simulation(
 ):
     """
     Асинхронный симулятор жизненного цикла Яндекс Доставки в реальном времени.
-    Отправляет клиенту пуши с реалистичными задержками и обновляет статус заказа.
+    Строго проверяет статус заказа перед каждым шагом — если заказ отменён, симуляция мгновенно прекращается.
     """
     courier = get_random_courier()
+
+    async def _is_cancelled() -> bool:
+        ord_info = await get_order(order_id)
+        if not ord_info or ord_info["status"] == "cancelled":
+            return True
+        return False
 
     async def _simulation_process():
         try:
             # 1. Поиск курьера через 6 секунд
             await asyncio.sleep(6)
+            if await _is_cancelled():
+                return
+
             try:
                 await bot.send_message(
                     user_id,
@@ -78,7 +88,9 @@ async def run_yandex_delivery_simulation(
 
             # 2. Курьер назначен через 12 секунд
             await asyncio.sleep(12)
-            courier_info = f"{courier['name']} ({courier['car']}, {courier['plate']})"
+            if await _is_cancelled():
+                return
+
             try:
                 await bot.send_message(
                     user_id,
@@ -104,6 +116,9 @@ async def run_yandex_delivery_simulation(
 
             # 2.5. Курьер ПРИБЫЛ В КАФЕ за заказом через 18 секунд
             await asyncio.sleep(18)
+            if await _is_cancelled():
+                return
+
             try:
                 await bot.send_message(
                     user_id,
@@ -127,6 +142,9 @@ async def run_yandex_delivery_simulation(
 
             # 3. Курьер забрал заказ из кафе и везёт клиенту через 15 секунд
             await asyncio.sleep(15)
+            if await _is_cancelled():
+                return
+
             try:
                 await bot.send_message(
                     user_id,
@@ -150,6 +168,9 @@ async def run_yandex_delivery_simulation(
 
             # 4. Курьер подъехал к подъезду через 25 секунд
             await asyncio.sleep(25)
+            if await _is_cancelled():
+                return
+
             try:
                 await bot.send_message(
                     user_id,
@@ -162,6 +183,9 @@ async def run_yandex_delivery_simulation(
 
             # 5. Успешно вручено через 15 секунд
             await asyncio.sleep(15)
+            if await _is_cancelled():
+                return
+
             # Обновляем статус в базе данных на completed
             await set_order_status(order_id, "completed")
 
@@ -206,14 +230,19 @@ async def run_yandex_delivery_simulation(
                 except Exception:
                     pass
 
-            # Автоматический запуск сбора отзыва (NPS) через 10 секунд
+            # Запрос отзыва (NPS) спустя 20 минут (1200 секунд)
             try:
                 from handlers import schedule_order_review
-                schedule_order_review(bot, order_id, user_id, delay_sec=10)
+                schedule_order_review(bot, order_id, user_id, delay_sec=1200)
             except Exception:
                 pass
 
+        except asyncio.CancelledError:
+            logging.info("Симуляция доставки заказа #%s была отменена.", order_id)
         except Exception as e:
-            logging.exception("Error in yandex delivery simulation: %s", e)
+            logging.exception("Ошибка в симуляции Яндекс Доставки: %s", e)
+        finally:
+            ACTIVE_DELIVERY_TASKS.pop(order_id, None)
 
-    asyncio.create_task(_simulation_process())
+    task = asyncio.create_task(_simulation_process())
+    ACTIVE_DELIVERY_TASKS[order_id] = task

@@ -158,6 +158,10 @@ def item_kb(item_id: str, qty: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=f"{qty} шт", callback_data="noop"),
         InlineKeyboardButton(text="➕", callback_data=f"inc:{item_id}"),
     )
+    if item_id.startswith("doner_") or "Донер" in ITEMS.get(item_id, {}).get("category", ""):
+        kb.row(
+            InlineKeyboardButton(text="🧀 Добавить добавки к шаурме", callback_data="cat:🧀 Добавки в шаурму"),
+        )
     kb.row(
         InlineKeyboardButton(text="⬅️ Назад в категорию", callback_data=f"cat:{ITEMS[item_id]['category']}"),
         InlineKeyboardButton(text="🧺 В корзину", callback_data="cart"),
@@ -214,11 +218,19 @@ def confirm_kb() -> InlineKeyboardMarkup:
 
 
 def payment_method_kb(order_id: int, pay_url: str) -> InlineKeyboardMarkup:
-    """Выбор способа оплаты после подтверждения заказа."""
+    """Выбор способа оплаты после подтверждения заказа (для самовывоза)."""
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="💳 Оплатить онлайн", url=pay_url))
     kb.row(InlineKeyboardButton(text="✅ Я оплатил онлайн", callback_data=f"paid:{order_id}"))
     kb.row(InlineKeyboardButton(text="💵 Оплачу на месте", callback_data=f"pay_cash:{order_id}"))
+    return kb.as_markup()
+
+
+def yandex_delivery_payment_kb(eda_url: str, delivery_cab_url: str) -> InlineKeyboardMarkup:
+    """Оплата и оформление курьерской доставки через Яндекс (только онлайн-переход, без лишних кнопок)."""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="💳 Оплатить в Яндекс Еде / Go", url=eda_url))
+    kb.row(InlineKeyboardButton(text="🚚 Кабинет Яндекс Доставки", url=delivery_cab_url))
     return kb.as_markup()
 
 
