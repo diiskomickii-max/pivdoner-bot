@@ -96,6 +96,16 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
         except Exception:
             pass
+        # миграция: причина отмены заказа
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN cancellation_reason TEXT")
+        except Exception:
+            pass
+        # миграция: согласие на рассылку
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN broadcast_consent INTEGER DEFAULT NULL")
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -105,7 +115,13 @@ async def create_order(
     user_id, username, name, phone, pickup_time, cart, comment, total,
     delivery_type="pickup", delivery_address="", delivery_cost=0.0
 ):
-    items_str = ", ".join(f"{ITEMS[iid]['name']} x{q}" for iid, q in cart.items())
+    from menu import parse_cart_item, ITEMS
+    items_list = []
+    for iid, q in cart.items():
+        parsed = parse_cart_item(iid)
+        iname = parsed["name"] if parsed else ITEMS.get(iid, {}).get("name", iid)
+        items_list.append(f"{iname} x{q}")
+    items_str = ", ".join(items_list)
     now = datetime.now().isoformat(timespec="seconds")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -139,6 +155,36 @@ async def set_order_payment(order_id, payment):
         await db.commit()
 
 
+async def set_order_cancellation(order_id: int, reason: str):
+    """Устанавливает статус отмены и причину отказа заведением."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET status='cancelled', cancellation_reason=? WHERE id=?",
+            (reason, order_id),
+        )
+        await db.commit()
+
+
+async def switch_order_to_pickup(order_id: int):
+    """Переключает заказ на самовывоз при сбое онлайн-оплаты, убирая стоимость доставки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM orders WHERE id=?", (order_id,))
+        order = await cur.fetchone()
+        if not order:
+            return None
+        deliv_cost = order["delivery_cost"]
+        new_total = max(0.0, order["total"] - deliv_cost)
+        await db.execute(
+            """UPDATE orders 
+               SET delivery_type='pickup', delivery_cost=0.0, total=?, payment='cash'
+               WHERE id=?""",
+            (new_total, order_id),
+        )
+        await db.commit()
+        return new_total
+
+
 async def get_today_stats():
     """Продажи за сегодня: заказы, сумма, топ позиций."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -161,11 +207,14 @@ async def get_order_status(order_id):
         return row[0] if row else None
 
 
-async def get_active_orders(limit=10):
+async def get_active_orders(limit=20):
+    """Список активных заказов (только в процессе приготовления или передачи курьеру)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT * FROM orders WHERE status NOT IN ('ready','cancelled') ORDER BY id DESC LIMIT ?",
+            """SELECT * FROM orders 
+               WHERE status IN ('new', 'accepted', 'cooking', 'ready', 'to_courier') 
+               ORDER BY id DESC LIMIT ?""",
             (limit,),
         )
         return await cur.fetchall()
@@ -326,14 +375,36 @@ async def create_review(order_id: int, user_id: int, rating: int, comment: str =
         return cur.lastrowid
 
 
-async def get_all_users(verified_only: bool = False):
-    """Список всех пользователей для таргетированной рассылки."""
+async def get_all_users(verified_only: bool = False, subscribed_only: bool = False):
+    """Список пользователей для таргетированной рассылки (с проверкой согласия)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        sql = "SELECT * FROM users WHERE is_verified=1" if verified_only else "SELECT * FROM users"
+        clauses = []
+        if verified_only:
+            clauses.append("is_verified=1")
+        if subscribed_only:
+            # Исключаем тех, кто явно нажал "Не присылать рассылку" (0)
+            clauses.append("broadcast_consent = 1")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM users{where}"
         cur = await db.execute(sql)
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+
+async def set_broadcast_consent(user_id: int, consent: int):
+    """Устанавливает согласие гостя на получение рассылок акций (1 или 0)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET broadcast_consent=? WHERE user_id=?", (consent, user_id))
+        await db.commit()
+
+
+async def get_broadcast_consent(user_id: int):
+    """Проверяет согласие пользователя на рассылку."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT broadcast_consent FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else None
 
 
 async def get_all_orders_for_export(limit: int = 1000):

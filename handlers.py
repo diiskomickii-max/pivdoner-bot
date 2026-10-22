@@ -27,6 +27,7 @@ from db import (
     get_active_orders,
     get_all_orders_for_export,
     get_all_users,
+    get_broadcast_consent,
     get_order,
     get_order_status,
     get_overall_reviews_stats,
@@ -37,17 +38,21 @@ from db import (
     get_user_referral_stats,
     get_user_stats,
     search_orders_by_phone,
+    set_broadcast_consent,
     set_last_bonus_game,
+    set_order_cancellation,
     set_order_payment,
     set_order_status,
     set_referrer,
+    switch_order_to_pickup,
     update_user_name,
     update_user_phone,
     upsert_user,
 )
 from excel_report import generate_excel_report
-from menu import CAFE, ITEMS, MENU, cart_text, fmt_price, pickup_ready_text
+from menu import CAFE, ITEMS, MENU, TOPPINGS, TOPPINGS_MAP, cart_text, fmt_price, parse_cart_item, pickup_ready_text
 from states import (
+    AdminCancelForm,
     AdminSearchForm,
     BroadcastForm,
     ComplaintForm,
@@ -57,7 +62,7 @@ from states import (
     ReviewForm,
 )
 from thermal_printer import format_receipt_text, generate_esc_pos_bytes
-from yandex_delivery import calculate_yandex_delivery, run_yandex_delivery_simulation
+from yandex_delivery import calculate_yandex_delivery, cancel_delivery_simulation, run_yandex_delivery_simulation
 
 router = Router()
 
@@ -66,6 +71,7 @@ STATUS_TEXT = {
     "accepted": "✅ Принят",
     "cooking": "🔥 Готовится",
     "ready": "🛍 Готов к выдаче",
+    "to_courier": "🚗 Передан курьеру (в пути)",
     "completed": "🏁 Выдан гостю",
     "cancelled": "❌ Отменён",
 }
@@ -74,7 +80,16 @@ PAYMENT_TEXT = {
     "none": "не выбрана",
     "cash": "💵 на месте",
     "online_marked": "💳 онлайн (ждёт подтверждения)",
+    "yandex_pending": "⏳ ожидает онлайн-оплаты в Яндекс",
+    "yandex_online": "💳 онлайн (Яндекс)",
     "paid": "✅ оплачен онлайн",
+}
+
+CANCEL_REASONS = {
+    "ingredients": "Закончились необходимые ингредиенты на кухне",
+    "power": "Аварийное отключение электричества / оборудования (форс-мажор)",
+    "overload": "Пиковая загрузка кухни, время ожидания более 60 минут",
+    "unreachable": "Не удалось связаться с клиентом по указанному номеру",
 }
 
 
@@ -110,6 +125,8 @@ def make_order_text(order: dict, is_demo: bool = False) -> str:
         f"💳 Оплата: <b>{pay_str}</b>\n"
         f"📊 Статус: <b>{st_str}</b>"
     )
+    if order.get("cancellation_reason"):
+        text += f"\n❌ Причина отмены: <b>{order['cancellation_reason']}</b>"
     if order.get("comment"):
         text += f"\n💬 {order['comment']}"
     if order.get("username"):
@@ -332,6 +349,19 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
 
     name = user["name"] or message.from_user.first_name or "Гость"
 
+    # Проверяем согласие на получение рассылок при первом запуске
+    user = dict(user)
+    if user.get("broadcast_consent") is None:
+        await message.answer(
+            f"👋 Привет, {name}!\n\n"
+            f"Добро пожаловать в кафе <b>«{CAFE['name']}»</b>.\n\n"
+            "📢 <b>Уведомления и специальные предложения:</b>\n"
+            "Хотите получать информацию об эксклюзивных скидках, новинках меню и секретных промокодах от «ПивДонер»?\n"
+            "<i>(Вы всегда сможете изменить этот выбор в личном кабинете)</i>",
+            reply_markup=kb.broadcast_consent_kb(),
+        )
+        return
+
     # Проверяем подтверждение телефона гостя
     if not is_user_verified(user):
         await state.set_state(RegistrationForm.waiting_for_phone)
@@ -350,6 +380,42 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
         return
 
     await send_main_greeting(message, name)
+
+
+@router.callback_query(F.data.startswith("bcast_consent:"))
+async def cb_bcast_consent(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    val = int(cb.data.split(":", 1)[1])
+    await set_broadcast_consent(cb.from_user.id, val)
+    user = await get_user(cb.from_user.id)
+    name = (user["name"] if user else None) or cb.from_user.first_name or "Гость"
+    ack = "✅ Вы согласились получать акции и скидки!" if val == 1 else "❌ Хорошо, мы не будем беспокоить вас рекламными рассылками."
+    await cb.message.edit_text(
+        f"{ack}\n\nНастройки сохранены. Вы всегда можете изменить их в личном кабинете.",
+        reply_markup=None,
+    )
+    if not is_user_verified(user):
+        await state.set_state(RegistrationForm.waiting_for_phone)
+        await send_step_msg(
+            state,
+            bot,
+            cb.message.chat.id,
+            f"🔐 <b>Регистрация гостя:</b>\n\n"
+            f"Перед оформлением заказов подтвердите свой номер телефона.\n"
+            f"Нажмите кнопку ниже или введите номер сообщением:",
+            reply_markup=kb.phone_request_kb(),
+        )
+    else:
+        await send_main_greeting(cb.message, name)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_bcast:"))
+async def cb_toggle_bcast(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    val = int(cb.data.split(":", 1)[1])
+    await set_broadcast_consent(cb.from_user.id, val)
+    await show_profile(cb.message.chat.id, cb.from_user.id, bot, state)
+    status_str = "включена ✅" if val == 1 else "отключена 🔕"
+    await cb.answer(f"Рассылка акций {status_str}")
 
 
 @router.callback_query(F.data == "start_reg")
@@ -560,7 +626,9 @@ async def show_profile(chat_id: int, user_id: int, bot: Bot, state: FSMContext =
             st = STATUS_TEXT.get(o["status"], o["status"])
             text += f"• №{o['id']} · {dt} · {o['total']:.2f} Br · {st}\n"
 
-    markup = kb.profile_kb(is_verified=verified)
+    user_d = dict(user)
+    bcast_status = user_d.get("broadcast_consent") if user_d.get("broadcast_consent") is not None else 1
+    markup = kb.profile_kb(is_verified=verified, broadcast_consent=bcast_status)
     if state:
         await send_step_msg(state, bot, chat_id, text, reply_markup=markup)
     else:
@@ -1071,6 +1139,93 @@ async def cb_dec(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("top_sel:"))
+async def cb_top_sel(cb: CallbackQuery):
+    doner_id = cb.data.split(":", 1)[1]
+    base = ITEMS.get(doner_id, {})
+    text = (
+        f"🧀 <b>Конструктор добавок к «{base.get('name', 'Шаурме')}»:</b>\n\n"
+        f"Базовая цена: <b>{base.get('price', 0.0):.2f} Br</b>\n\n"
+        f"Отмечайте нужные добавки кнопками ниже и нажмите <b>«Добавить в корзину»</b>:"
+    )
+    await cb.message.edit_text(text, reply_markup=kb.toppings_selector_kb(doner_id, mask=""))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("top_t:"))
+async def cb_top_toggle(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer()
+        return
+    doner_id = parts[1]
+    idx_str = parts[2]
+    old_mask = parts[3] if len(parts) >= 4 else ""
+
+    mask_set = set(old_mask)
+    if idx_str in mask_set:
+        mask_set.remove(idx_str)
+    else:
+        mask_set.add(idx_str)
+    new_mask = "".join(sorted(mask_set))
+
+    base = ITEMS.get(doner_id, {})
+    total_price = base.get("price", 0.0)
+    selected_names = []
+    for d in new_mask:
+        t = TOPPINGS[int(d)]
+        total_price += t["price"]
+        selected_names.append(t["name"])
+
+    tops_info = f"\nВыбрано: <i>{', '.join(selected_names)}</i>" if selected_names else ""
+    text = (
+        f"🧀 <b>Конструктор добавок к «{base.get('name', 'Шаурме')}»:</b>\n\n"
+        f"Базовая цена: <b>{base.get('price', 0.0):.2f} Br</b>{tops_info}\n"
+        f"Итоговая цена: <b>{total_price:.2f} Br</b>\n\n"
+        f"Отмечайте нужные добавки кнопками ниже и нажмите <b>«Добавить в корзину»</b>:"
+    )
+    await cb.message.edit_text(text, reply_markup=kb.toppings_selector_kb(doner_id, mask=new_mask))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("top_add:"))
+async def cb_top_add(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    doner_id = parts[1]
+    mask = parts[2] if len(parts) >= 3 else ""
+
+    top_ids = [TOPPINGS[int(d)]["id"] for d in mask if d.isdigit() and int(d) < len(TOPPINGS)]
+    if top_ids:
+        item_key = f"{doner_id}+{'+'.join(top_ids)}"
+    else:
+        item_key = doner_id
+
+    cart = await get_cart(state)
+    cart[item_key] = cart.get(item_key, 0) + 1
+    await save_cart(state, cart)
+
+    parsed = parse_cart_item(item_key)
+    item_name = parsed["name"] if parsed else ITEMS.get(doner_id, {}).get("name", doner_id)
+    item_price = parsed["price"] if parsed else ITEMS.get(doner_id, {}).get("price", 0.0)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🧺 Перейти в корзину", callback_data="cart"),
+        InlineKeyboardButton(text="🍔 Меню", callback_data="menu"),
+    )
+    cat = ITEMS.get(doner_id, {}).get("category", "🌯 Донеры / Шаурма")
+    b.row(InlineKeyboardButton(text="🌯 Ещё шаурму", callback_data=f"cat:{cat}"))
+
+    text = (
+        f"✅ <b>{item_name}</b> добавлена в корзину!\n\n"
+        f"💰 Цена: <b>{item_price:.2f} Br</b>\n"
+        f"В корзине: <b>{cart[item_key]} шт</b>"
+    )
+    await cb.message.edit_text(text, reply_markup=b.as_markup())
+    await cb.answer("Шаурма добавлена в корзину!")
+
+
 async def _render_cart_view(target, state: FSMContext, edit=False, bot: Bot = None, chat_id: int = None):
     cart = await get_cart(state)
     if not cart:
@@ -1462,19 +1617,18 @@ async def cb_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
             f"⏱ Время доставки: <b>{data.get('pickup_time')}</b>\n"
         )
         confirmation = (
-            f"✅ <b>Заказ №{order_id} передан на кухню!</b>\n\n"
+            f"🚕 <b>Заказ №{order_id} зарегистрирован!</b>\n\n"
             f"{deliv_note}"
-            f"💰 Сумма к оплате: <b>{grand_total:.2f} Br</b>\n\n"
+            f"💰 Сумма к оплате: <b>{grand_total:.2f} Br</b> (включая доставку)\n\n"
             "💳 <b>Оплата через Яндекс:</b>\n"
             "При оформлении курьерской доставки доступна только онлайн-оплата через сервис <b>Яндекс Еда / Go</b>.\n\n"
-            "Для дальнейшего оформления и оплаты заказа перейдите в Яндекс Доставку:"
+            "Для дальнейшего оформления и оплаты заказа перейдите в сервис Яндекс. После подтверждения оплаты заказ сразу поступит поварам на кухню!"
         )
-        await set_order_payment(order_id, "yandex_online")
-        await _send_order_to_group(bot, order_id, "yandex_online", cb.from_user.id)
+        await set_order_payment(order_id, "yandex_pending")
         
         yandex_eda = os.getenv("YANDEX_EDA_URL", "https://eda.yandex.by/")
         yandex_cab = os.getenv("YANDEX_DELIVERY_URL", "https://dostavka.yandex.by/")
-        markup = kb.yandex_delivery_payment_kb(yandex_eda, yandex_cab)
+        markup = kb.yandex_delivery_payment_kb(order_id, yandex_eda, yandex_cab)
     else:
         deliv_note = (
             f"🕐 Время готовности: <b>{data['pickup_time']}</b>\n"
@@ -1497,6 +1651,61 @@ async def cb_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
     if deliv_type == "yandex":
         await cb.message.answer("Быстрые действия:", reply_markup=kb.main_menu())
     await cb.answer("Заказ оформлен")
+
+
+@router.callback_query(F.data.startswith("yandex_pay_sim:ok:"))
+async def cb_yandex_pay_sim_ok(cb: CallbackQuery, bot: Bot):
+    order_id = int(cb.data.split(":")[-1])
+    await set_order_payment(order_id, "paid")
+    await cb.message.edit_text(
+        f"✅ <b>Оплата заказа №{order_id} через сервис Яндекс успешно подтверждена!</b> (Оплачено)\n\n"
+        f"Заказ поступил на кухню «ПивДонер». Как только кафе примет заказ, система начнёт поиск водителя Яндекс Go!",
+        reply_markup=None,
+    )
+    await _send_order_to_group(bot, order_id, payment="paid", user_id=cb.from_user.id)
+    await cb.answer("Оплата подтверждена")
+
+
+@router.callback_query(F.data.startswith("yandex_pay_sim:fail:"))
+async def cb_yandex_pay_sim_fail(cb: CallbackQuery, bot: Bot):
+    order_id = int(cb.data.split(":")[-1])
+    yandex_eda = os.getenv("YANDEX_EDA_URL", "https://eda.yandex.by/")
+    await cb.message.edit_text(
+        f"⚠️ <b>Оплата заказа №{order_id} в сервисе Яндекс не прошла или была отклонена банком.</b>\n\n"
+        f"Заказ пока не передан поварам.\n\n"
+        f"<b>Что вы хотите сделать?</b>\n"
+        f"• Попробовать оплатить повторно через Яндекс;\n"
+        f"• Или переключить заказ на <b>Самовывоз</b> — стоимость доставки спишется, и вы сможете оплатить заказ на месте при получении наличными или картой.",
+        reply_markup=kb.yandex_payment_failed_kb(order_id, yandex_eda),
+    )
+    await cb.answer("Сбой оплаты", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("yandex_to_pickup:"))
+async def cb_yandex_to_pickup(cb: CallbackQuery, bot: Bot):
+    order_id = int(cb.data.split(":")[-1])
+    new_total = await switch_order_to_pickup(order_id)
+    await _send_order_to_group(bot, order_id, payment="cash", user_id=cb.from_user.id)
+    await cb.message.edit_text(
+        f"🏃 <b>Заказ №{order_id} переключен на самовывоз!</b>\n\n"
+        f"📍 Адрес кафе: <b>{CAFE['address']}</b>\n"
+        f"💰 Новая сумма: <b>{new_total:.2f} Br</b> (стоимость доставки исключена)\n"
+        f"💵 Оплата: <b>на месте при получении (наличные или карта)</b>\n\n"
+        f"Заказ передан поварам на кухню «ПивДонер»!",
+        reply_markup=None,
+    )
+    await cb.answer("Переключено на самовывоз")
+
+
+@router.callback_query(F.data.startswith("cancel_order_guest:"))
+async def cb_cancel_order_guest(cb: CallbackQuery):
+    order_id = int(cb.data.split(":")[-1])
+    await set_order_cancellation(order_id, "Отменено клиентом (сбой онлайн-оплаты Яндекс)")
+    await cb.message.edit_text(
+        f"❌ <b>Заказ №{order_id} отменён.</b>\nБудем рады видеть вас снова в «ПивДонер»!",
+        reply_markup=None,
+    )
+    await cb.answer("Заказ отменён")
 
 
 @router.callback_query(F.data.startswith("pay_cash:"))
@@ -1591,19 +1800,6 @@ async def _send_order_to_group(bot: Bot, order_id: int, payment: str, user_id: i
             bot, order_id, order["user_id"], sent_msg.chat.id, sent_msg.message_id
         )
 
-        # Если заказ через Яндекс Доставку — запускаем симуляцию курьера
-        if order.get("delivery_type") == "yandex":
-            asyncio.create_task(
-                run_yandex_delivery_simulation(
-                    bot=bot,
-                    order_id=order_id,
-                    user_id=order["user_id"],
-                    address=order.get("delivery_address") or "ул. Притыцкого, 83",
-                    admin_chat_id=sent_msg.chat.id,
-                    admin_msg_id=sent_msg.message_id,
-                )
-            )
-
         return True
     except Exception:
         logging.exception("Could not deliver order %s to chat %s", order_id, chat)
@@ -1673,7 +1869,12 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
 
     try:
         new_text = make_order_text(order, is_demo=DEMO_MODE)
-        new_kb = kb.status_kb(order_id, status=status, payment=order.get("payment", "none"))
+        new_kb = kb.status_kb(
+            order_id,
+            status=status,
+            payment=order.get("payment", "none"),
+            delivery_type=order.get("delivery_type", "pickup"),
+        )
         await cb.message.edit_text(new_text, reply_markup=new_kb)
     except Exception:
         logging.exception("Could not update order card %s after status change", order_id)
@@ -1682,21 +1883,21 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
 
     is_yandex = order.get("delivery_type") == "yandex"
     ready_text = (
-        f"🔔 <b>Заказ №{order_id}</b>: 🛍 собран на кухне! Передаём курьеру Яндекс Go."
+        f"🔔 <b>Заказ №{order_id}</b>: 🛍 собран на кухне! Ожидаем курьера Яндекс Go для передачи."
         if is_yandex
         else f"🔔 <b>Заказ №{order_id}</b>: 🛍 ГОТОВ к выдаче!\nЖдём вас на стойке кафе «ПивДонер» ({CAFE['address']})."
     )
-    completed_text = (
-        f"❤️ <b>Заказ №{order_id} доставлен курьером!</b>\nПриятного аппетита! Ждём вас снова в «ПивДонер»!"
-        if is_yandex
-        else f"❤️ <b>Заказ №{order_id} выдан!</b>\nПриятного аппетита! Ждём вас снова в «ПивДонер»!"
-    )
 
     guest_msg = {
-        "accepted": f"🔔 <b>Заказ №{order_id}</b>: ✅ принят в работу!\nСкоро повара начнут приготовление.",
+        "accepted": f"🔔 <b>Заказ №{order_id}</b>: ✅ принят заведением в работу!\nПовара приступают к приготовлению.",
         "cooking": f"🔔 <b>Заказ №{order_id}</b>: 🔥 готовится поваром!\nПриготовим точно к {order.get('pickup_time', 'скоро')}.",
         "ready": ready_text,
-        "completed": completed_text,
+        "to_courier": f"🚗 <b>Заказ №{order_id} передан курьеру Яндекс Go!</b>\nКурьер уже мчит по вашему адресу с горячей едой в термосумке.",
+        "completed": (
+            f"❤️ <b>Заказ №{order_id} успешно доставлен!</b>\nПриятного аппетита! Ждём вас снова в «ПивДонер»!"
+            if is_yandex
+            else f"❤️ <b>Заказ №{order_id} выдан!</b>\nПриятного аппетита! Ждём вас снова в «ПивДонер»!"
+        ),
         "cancelled": f"❌ <b>Заказ №{order_id} отменён заведением.</b>",
     }.get(status)
 
@@ -1706,15 +1907,160 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
         except Exception:
             pass
 
+    # Поиск машины включается ТОЛЬКО когда кафе приняло заказ
+    if status == "accepted" and is_yandex:
+        asyncio.create_task(
+            run_yandex_delivery_simulation(
+                bot=bot,
+                order_id=order_id,
+                user_id=order["user_id"],
+                address=order.get("delivery_address") or "ул. Притыцкого, 83",
+                admin_chat_id=cb.message.chat.id,
+                admin_msg_id=cb.message.message_id,
+            )
+        )
+
     if status == "cancelled":
         try:
-            from yandex_delivery import cancel_delivery_simulation
             cancel_delivery_simulation(order_id)
         except Exception:
             pass
 
     if status == "completed" and order.get("user_id"):
         schedule_order_review(bot, order_id, order["user_id"], delay_sec=1200)
+
+
+@router.callback_query(F.data.startswith("st_cancel:"))
+async def cb_st_cancel(cb: CallbackQuery):
+    order_id = int(cb.data.split(":", 1)[1])
+    await cb.message.edit_reply_markup(reply_markup=kb.admin_cancel_reasons_kb(order_id))
+    await cb.answer("Укажите причину отмены")
+
+
+@router.callback_query(F.data.startswith("cancel_r:"))
+async def cb_cancel_reason(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer()
+        return
+    order_id = int(parts[1])
+    code = parts[2]
+
+    order = await get_order(order_id)
+    if not order:
+        await cb.answer("Заказ не найден", show_alert=True)
+        return
+    order = dict(order)
+
+    if code == "back":
+        original_kb = kb.status_kb(
+            order_id,
+            status=order.get("status", "new"),
+            payment=order.get("payment", "none"),
+            delivery_type=order.get("delivery_type", "pickup"),
+        )
+        await cb.message.edit_reply_markup(reply_markup=original_kb)
+        await cb.answer("Отмена действия")
+        return
+
+    if code == "custom":
+        await state.set_state(AdminCancelForm.waiting_for_reason)
+        await state.update_data(
+            cancel_order_id=order_id,
+            admin_chat_id=cb.message.chat.id,
+            admin_msg_id=cb.message.message_id,
+        )
+        cancel_kb = InlineKeyboardBuilder()
+        cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_r:{order_id}:back"))
+        await cb.message.answer(
+            f"✍️ <b>Введите причину отмены заказа №{order_id} сообщением в чат:</b>\n"
+            f"(Она отобразится в отчётах и будет отправлена гостю)",
+            reply_markup=cancel_kb.as_markup(),
+        )
+        await cb.answer()
+        return
+
+    reason_text = CANCEL_REASONS.get(code, "Отменено заведением")
+    await _apply_admin_cancellation(
+        bot=bot,
+        order_id=order_id,
+        reason=reason_text,
+        chat_id=cb.message.chat.id,
+        msg_id=cb.message.message_id,
+    )
+    await cb.answer("Заказ отменён")
+
+
+@router.message(AdminCancelForm.waiting_for_reason, F.text)
+async def admin_got_custom_reason(message: Message, state: FSMContext, bot: Bot):
+    if message.text.strip() == "❌ Отмена":
+        await state.clear()
+        await message.answer("Отмена отклонена.")
+        return
+    data = await state.get_data()
+    order_id = data.get("cancel_order_id")
+    chat_id = data.get("admin_chat_id", message.chat.id)
+    msg_id = data.get("admin_msg_id")
+    await state.clear()
+
+    if not order_id:
+        await message.answer("Номер заказа не найден.")
+        return
+
+    reason = message.text.strip()
+    await _apply_admin_cancellation(
+        bot=bot,
+        order_id=order_id,
+        reason=reason,
+        chat_id=chat_id,
+        msg_id=msg_id,
+    )
+    await message.answer(f"✅ Заказ №{order_id} отменён с причиной:\n«{reason}»")
+
+
+async def _apply_admin_cancellation(bot: Bot, order_id: int, reason: str, chat_id: int, msg_id: int = None):
+    """Применяет отмену заказа с сохранением причины, остановкой курьера и уведомлением гостя."""
+    await set_order_cancellation(order_id, reason)
+    try:
+        cancel_delivery_simulation(order_id)
+    except Exception:
+        pass
+
+    order = await get_order(order_id)
+    if not order:
+        return
+    order = dict(order)
+    order["status"] = "cancelled"
+    order["cancellation_reason"] = reason
+
+    if msg_id:
+        try:
+            new_text = make_order_text(order, is_demo=DEMO_MODE)
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=new_text,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+    user_id = order.get("user_id")
+    if user_id:
+        try:
+            refund_note = (
+                "\n\n💳 <i>Если заказ был оплачен онлайн через Яндекс, деньги будут автоматически возвращены на вашу карту.</i>"
+                if order.get("delivery_type") == "yandex"
+                else ""
+            )
+            await bot.send_message(
+                user_id,
+                f"❌ <b>Заказ №{order_id} отменён заведением.</b>\n\n"
+                f"Причина: <b>{reason}</b>\n\n"
+                f"Приносим искренние извинения за доставленные неудобства!{refund_note}"
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("payok:"))
@@ -1753,14 +2099,21 @@ async def cb_payok(cb: CallbackQuery, bot: Bot):
 async def cb_admin_active(cb: CallbackQuery):
     orders = await get_active_orders()
     if not orders:
-        text = "Активных заказов нет."
+        text = (
+            "📋 <b>На данный момент нет активных заказов.</b>\n\n"
+            "Все завершённые и архивные заказы можно посмотреть в <b>📊 Отчёте за сегодня</b> или выгрузить в Excel."
+        )
     else:
-        text = "📋 <b>Активные заказы:</b>\n\n"
+        text = "📋 <b>Активные заказы в работе:</b>\n\n"
         for o in orders:
             pay = PAYMENT_TEXT.get(o["payment"], o["payment"])
+            st = STATUS_TEXT.get(o["status"], o["status"])
+            deliv = "🚕 Яндекс" if o.get("delivery_type") == "yandex" else "🏃 Самовывоз"
             text += (
-                f"№{o['id']} · {o['pickup_time']} · {o['total']:.2f} Br · "
-                f"{o['status']} · 💳 {pay}\n  {o['items']}\n\n"
+                f"<b>Заказ №{o['id']}</b> ({deliv})\n"
+                f"⏱ Время: {o['pickup_time']} · 💰 {o['total']:.2f} Br\n"
+                f"📌 Статус: <b>{st}</b> · 💳 {pay}\n"
+                f"🛒 Блюда: {o['items']}\n\n"
             )
     await cb.message.answer(text, reply_markup=kb.admin_kb())
     await cb.answer()
@@ -2091,7 +2444,7 @@ async def cb_start_broadcast(cb: CallbackQuery, state: FSMContext):
 async def broadcast_got_photo(message: Message, state: FSMContext, bot: Bot):
     photo_id = message.photo[-1].file_id
     caption = message.caption or ""
-    users = await get_all_users()
+    users = await get_all_users(subscribed_only=True)
     count = len(users)
 
     await state.update_data(photo_id=photo_id, text=caption, target_count=count)
@@ -2118,7 +2471,7 @@ async def broadcast_got_text(message: Message, state: FSMContext, bot: Bot):
         return
 
     text = message.text.strip()
-    users = await get_all_users()
+    users = await get_all_users(subscribed_only=True)
     count = len(users)
 
     await state.update_data(text=text, photo_id=None, target_count=count)
@@ -2138,7 +2491,7 @@ async def cb_send_broadcast(cb: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
     text = data.get("text", "")
     photo_id = data.get("photo_id")
-    users = await get_all_users()
+    users = await get_all_users(subscribed_only=True)
 
     await cb.message.edit_text("⏳ <b>Идёт отправка рассылки...</b> Пожалуйста, подождите.")
 

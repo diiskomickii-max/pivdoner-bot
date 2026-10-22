@@ -17,14 +17,19 @@ from handlers import router
 logging.basicConfig(level=logging.INFO)
 
 
+GLOBAL_BOT: Bot = None
+
+
 async def get_working_bot() -> Bot:
     """Проверяет доступность основного токена, при сбое автоматически переключается на запасной."""
+    global GLOBAL_BOT
     tokens = [t for t in [BOT_TOKEN, FALLBACK_BOT_TOKEN] if t]
     for token in tokens:
         try:
             bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
             me = await bot.get_me()
             logging.info("✅ Успешно запущен бот: @%s (ID: %s)", me.username, me.id)
+            GLOBAL_BOT = bot
             return bot
         except Exception as e:
             logging.error("⚠️ Токен %s... не отвечает: %s. Пробуем резервный токен...", token[:12], e)
@@ -33,6 +38,48 @@ async def get_working_bot() -> Bot:
 
 async def handle_health(request):
     return web.Response(text="PivDoner Production Bot is running OK", content_type="text/plain")
+
+
+async def handle_yandex_webhook(request):
+    """Принимает вебхук от платёжной системы / сервиса Яндекс Доставка."""
+    try:
+        data = await request.json()
+        order_id = int(data.get("order_id", 0))
+        status = data.get("status", "")
+        from db import set_order_payment, get_order
+        import keyboards as kb
+        from handlers import _send_order_to_group
+
+        order = await get_order(order_id)
+        if not order:
+            return web.json_response({"error": "order not found"}, status=404)
+
+        user_id = order["user_id"]
+        if status == "success":
+            await set_order_payment(order_id, "paid")
+            if GLOBAL_BOT:
+                await GLOBAL_BOT.send_message(
+                    user_id,
+                    f"✅ <b>Оплата заказа №{order_id} через сервис Яндекс успешно получена!</b> (Оплачено)\n\n"
+                    f"Заказ поступил на кухню «ПивДонер». Скоро повара начнут приготовление!",
+                )
+                await _send_order_to_group(GLOBAL_BOT, order_id, "paid", user_id)
+            return web.json_response({"status": "ok", "action": "paid"})
+        elif status == "failed":
+            eda_url = os.getenv("YANDEX_EDA_URL", "https://eda.yandex.by/")
+            if GLOBAL_BOT:
+                await GLOBAL_BOT.send_message(
+                    user_id,
+                    f"⚠️ <b>Оплата заказа №{order_id} в сервисе Яндекс не прошла или была отклонена банком.</b>\n\n"
+                    f"Заказ пока не передан поварам.\n\n"
+                    f"Вы можете попробовать оплатить повторно или переключить заказ на <b>Самовывоз</b>.",
+                    reply_markup=kb.yandex_payment_failed_kb(order_id, eda_url),
+                )
+            return web.json_response({"status": "ok", "action": "failed_notified"})
+        return web.json_response({"status": "ignored"})
+    except Exception as e:
+        logging.exception("Webhook error: %s", e)
+        return web.json_response({"error": str(e)}, status=500)
 
 
 async def handle_webapp(request):
@@ -65,6 +112,7 @@ async def start_web_server():
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/webapp", handle_webapp)
+    app.router.add_post("/api/yandex_webhook", handle_yandex_webhook)
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.exists(static_dir):
         app.router.add_static("/static", static_dir)

@@ -192,21 +192,62 @@ for cat, items in MENU.items():
         i["category"] = cat
         ITEMS[i["id"]] = i
 
+TOPPINGS = MENU.get("🧀 Добавки в шаурму", [])
+TOPPINGS_MAP = {t["id"]: t for t in TOPPINGS}
+
 
 def fmt_price(p: float) -> str:
     return f"{p:.2f}".rstrip("0").rstrip(".") + " Br"
 
 
-def cart_text(cart: dict) -> str:
-    """cart: {item_id: qty} -> текст корзины и сумма"""
+def parse_cart_item(key: str) -> dict:
+    """
+    Разбирает ключ товара корзины:
+    - Простой товар: 'doner_classic'
+    - Шаурма с добавками: 'doner_classic+top_cheese_moz+top_jalapeno'
+    """
+    parts = key.split("+")
+    base_id = parts[0]
+    base_item = ITEMS.get(base_id)
+    if not base_item:
+        return None
+
+    name = base_item["name"]
+    price = base_item["price"]
+    top_names = []
+
+    for tid in parts[1:]:
+        t = TOPPINGS_MAP.get(tid) or ITEMS.get(tid)
+        if t:
+            price += t["price"]
+            top_names.append(t["name"])
+
+    if top_names:
+        name += f" (+ {', '.join(top_names)})"
+
+    return {
+        "key": key,
+        "base_id": base_id,
+        "name": name,
+        "base_name": base_item["name"],
+        "price": price,
+        "toppings": top_names,
+        "topping_ids": parts[1:],
+    }
+
+
+def cart_text(cart: dict) -> tuple:
+    """cart: {item_key: qty} -> текст корзины и общая сумма"""
     lines, total = [], 0.0
     for iid, qty in cart.items():
-        if iid not in ITEMS or qty <= 0:
+        if qty <= 0:
             continue
-        item = ITEMS[iid]
-        s = item["price"] * qty
+        parsed = parse_cart_item(iid)
+        if not parsed:
+            continue
+        s = parsed["price"] * qty
         total += s
-        lines.append(f"• {item['name']} ×{qty} — {s:.2f} Br")
+        lines.append(f"• {parsed['name']} ×{qty} — {s:.2f} Br")
     lines.append(f"\n💰 Итого: <b>{total:.2f} Br</b>")
     return "\n".join(lines), total
 

@@ -30,6 +30,10 @@ class ReviewForm(StatesGroup):
     waiting_for_comment = State()   # клиент пишет замечание при низкой оценке
 
 
+class AdminCancelForm(StatesGroup):
+    waiting_for_reason = State()    # администратор вводит причину отмены заказа текстом
+
+
 class OrderForm(StatesGroup):
     browsing = State()          # листает меню / корзина
     delivery_choice = State()   # выбор: Яндекс Доставка / Самовывоз
