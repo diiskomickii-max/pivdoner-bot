@@ -43,7 +43,11 @@ jobs:
       - name: Run Telegram Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          FALLBACK_BOT_TOKEN: ${{ secrets.FALLBACK_BOT_TOKEN }}
           MANAGER_CHAT_ID: ${{ secrets.MANAGER_CHAT_ID }}
+          ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+          DEMO_MODE: ${{ secrets.DEMO_MODE }}
+          SELLER_CONTACT: ${{ secrets.SELLER_CONTACT }}
           PAYMENT_URL: ${{ secrets.PAYMENT_URL }}
           PAYMENT_ENABLED: ${{ secrets.PAYMENT_ENABLED }}
           PYTHONUNBUFFERED: "1"
