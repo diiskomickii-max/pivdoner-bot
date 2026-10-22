@@ -6,12 +6,26 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     autoDeploy: true
+    healthCheckPath: /health
     envVars:
       - key: BOT_TOKEN
         sync: false
+      - key: FALLBACK_BOT_TOKEN
+        sync: false
       - key: MANAGER_CHAT_ID
         sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: DEMO_MODE
+        value: "0"
+      - key: SELLER_CONTACT
+        value: "@xxlkkl"
       - key: PAYMENT_URL
         value: "https://pay.example.com/pay?order={order_id}&sum={amount}"
       - key: PAYMENT_ENABLED
         value: "1"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Render подставит сам, но оставляем для явности:
+      - key: RENDER_EXTERNAL_URL
+        sync: false

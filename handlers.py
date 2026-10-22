@@ -51,11 +51,13 @@ from db import (
     get_user_orders,
     get_user_referral_stats,
     get_user_stats,
+    has_review_for_order,
     remove_from_stop_list,
     search_orders_by_phone,
     set_broadcast_consent,
     set_last_bonus_game,
     set_order_cancellation,
+    set_order_group_msg,
     set_order_payment,
     set_order_status,
     set_referrer,
@@ -226,6 +228,17 @@ async def delete(msg: Message):
         await msg.delete()
     except Exception:
         pass
+
+
+async def safe_edit(cb: CallbackQuery, text: str, reply_markup=None):
+    """Безопасный edit: если сообщение без текста (фото/документ/стикер) — шлём новое."""
+    try:
+        await cb.message.edit_text(text, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await cb.message.answer(text, reply_markup=reply_markup)
+        except Exception:
+            pass
 
 
 async def cleanup_step_msg(state: FSMContext, bot: Bot, chat_id: int):
@@ -1260,6 +1273,10 @@ async def cb_inc(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("dec:"))
 async def cb_dec(cb: CallbackQuery, state: FSMContext):
     item_id = cb.data.split(":", 1)[1]
+    stop_info = await get_item_stop_info(item_id)
+    if stop_info:
+        await cb.answer(f"⛔ Блюдо на стопе: {stop_info.get('reason', 'Закончилось')}", show_alert=True)
+        return
     cart = await get_cart(state)
     if cart.get(item_id, 0) > 0:
         cart[item_id] -= 1
@@ -1737,6 +1754,28 @@ async def got_custom_time(message: Message, state: FSMContext, bot: Bot):
         return
 
     time_str = message.text.strip()
+    # Валидация формата ЧЧ:ММ и разумных границ
+    m = re.fullmatch(r"(\d{1,2})[:.\s](\d{2})", time_str)
+    if not m:
+        await send_step_msg(
+            state,
+            bot,
+            message.chat.id,
+            "⚠️ Неверный формат времени. Напишите время в формате <b>ЧЧ:ММ</b> (например, <code>18:30</code>):",
+            reply_markup=kb.cancel_reply_kb(),
+        )
+        return
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if hh > 23 or mm > 59:
+        await send_step_msg(
+            state,
+            bot,
+            message.chat.id,
+            "⚠️ Такого времени не существует. Введите корректное время <b>ЧЧ:ММ</b> (00:00–23:59):",
+            reply_markup=kb.cancel_reply_kb(),
+        )
+        return
+    time_str = f"{hh:02d}:{mm:02d}"
     await state.update_data(pickup_time=time_str)
     await state.set_state(OrderForm.comment)
 
@@ -2004,26 +2043,33 @@ async def cmd_cancel(message: Message, state: FSMContext, bot: Bot):
 # ---------- Отправка заказа на кухню и авто-готовка ----------
 
 async def _send_order_to_group(bot: Bot, order_id: int, payment: str, user_id: int = 0) -> bool:
-    """Отправляет заказ в группу заведения или гостю в демо-режиме."""
+    """Отправляет заказ в группу заведения или гостю в демо-режиме.
+    Защита от дублей: если у заказа уже есть карточка в группе — не шлём повторно."""
     order = await get_order(order_id)
     if not order:
         logging.error("Order %s was not found before delivery", order_id)
         return False
     order = dict(order)
+    # Идемпотентность: карточка уже отправлена в группу
+    if order.get("group_msg_id"):
+        logging.info("Order %s already delivered to group (msg %s), skipping duplicate.", order_id, order["group_msg_id"])
+        return True
     order["payment"] = payment
     order["status"] = "new"
 
     chat = user_id if DEMO_MODE else MANAGER_CHAT_ID
     manager_text = make_order_text(order, is_demo=DEMO_MODE)
-    manager_kb = kb.status_kb(order_id, status="new", payment=payment)
+    manager_kb = kb.status_kb(order_id, status="new", payment=payment, delivery_type=order.get("delivery_type", "pickup"))
     try:
         sent_msg = await bot.send_message(chat, manager_text, reply_markup=manager_kb)
-        await bot.send_message(chat, f"🔔 Новый заказ №{order_id} — смотри выше!")
+        try:
+            await set_order_group_msg(order_id, sent_msg.chat.id, sent_msg.message_id)
+        except Exception:
+            pass
         # Авто-перевод в «Готовится» через 2.5 мин если повар не нажал сам
         _schedule_auto_cooking(
             bot, order_id, order["user_id"], sent_msg.chat.id, sent_msg.message_id
         )
-
         return True
     except Exception:
         logging.exception("Could not deliver order %s to chat %s", order_id, chat)
@@ -2070,8 +2116,20 @@ def _schedule_auto_cooking(
 
 # ---------- Статусы (для кухни и заведения) ----------
 
+def _is_admin_context(cb: CallbackQuery) -> bool:
+    """Разрешает действие только админу или в группе кухни."""
+    if DEMO_MODE:
+        return True
+    if cb.message and cb.message.chat.id == MANAGER_CHAT_ID:
+        return True
+    return is_admin_user(cb.from_user.id if cb.from_user else 0)
+
+
 @router.callback_query(F.data.startswith("st:"))
 async def cb_status(cb: CallbackQuery, bot: Bot):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни может менять статус заказа.", show_alert=True)
+        return
     parts = cb.data.split(":")
     if len(parts) != 3:
         await cb.answer()
@@ -2156,6 +2214,9 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("st_cancel:"))
 async def cb_st_cancel(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     order_id = int(cb.data.split(":", 1)[1])
     await cb.message.edit_reply_markup(reply_markup=kb.admin_cancel_reasons_kb(order_id))
     await cb.answer("Укажите причину отмены")
@@ -2163,6 +2224,9 @@ async def cb_st_cancel(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cancel_r:"))
 async def cb_cancel_reason(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     parts = cb.data.split(":")
     if len(parts) < 3:
         await cb.answer()
@@ -2289,6 +2353,9 @@ async def _apply_admin_cancellation(bot: Bot, order_id: int, reason: str, chat_i
 
 @router.callback_query(F.data.startswith("payok:"))
 async def cb_payok(cb: CallbackQuery, bot: Bot):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни может подтверждать оплату.", show_alert=True)
+        return
     order_id = int(cb.data.split(":", 1)[1])
     await set_order_payment(order_id, "paid")
     order = await get_order(order_id)
@@ -2320,6 +2387,9 @@ async def cb_payok(cb: CallbackQuery, bot: Bot):
 @router.message(Command(commands=["active", "orders"]))
 @router.message(F.text.in_({"📋 Активные заказы", "Активные заказы"}))
 async def cmd_group_active(message: Message):
+    if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
+        await message.answer("⚠️ Данный раздел доступен только персоналу кафе.")
+        return
     orders = await get_active_orders()
     if not orders:
         await message.answer("📋 <b>На кухне нет активных заказов.</b>\nВсе заказы выданы или завершены!")
@@ -2341,6 +2411,9 @@ async def cmd_group_active(message: Message):
 
 @router.message(Command("report"))
 async def cmd_group_report(message: Message):
+    if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
+        await message.answer("⚠️ Данный раздел доступен только персоналу кафе.")
+        return
     text = await _report_text()
     await message.answer(text)
 
@@ -2348,6 +2421,9 @@ async def cmd_group_report(message: Message):
 @router.message(Command("excel"))
 @router.message(F.text.in_({"📑 Экспорт в Excel", "Экспорт в Excel"}))
 async def cmd_group_excel(message: Message, bot: Bot):
+    if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
+        await message.answer("⚠️ Данный раздел доступен только персоналу кафе.")
+        return
     try:
         from excel_report import generate_excel_report
         file_path = await generate_excel_report()
@@ -2376,6 +2452,9 @@ async def cmd_show_id(message: Message):
 
 @router.callback_query(F.data == "admin_active")
 async def cb_admin_active(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     orders = await get_active_orders()
     if not orders:
         text = (
@@ -2423,7 +2502,7 @@ async def _render_stop_list_view(target, edit: bool = True):
         markup = kb.admin_stop_menu_kb(has_stopped=True)
 
     if edit and isinstance(target, CallbackQuery):
-        await target.message.edit_text(text, reply_markup=markup)
+        await safe_edit(target, text, reply_markup=markup)
     elif isinstance(target, CallbackQuery):
         await target.message.answer(text, reply_markup=markup)
     else:
@@ -2441,14 +2520,21 @@ async def cmd_admin_stop(message: Message):
 
 @router.callback_query(F.data.in_({"admin_stop_list", "stop_list_refresh"}))
 async def cb_admin_stop_list(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     await _render_stop_list_view(cb, edit=True)
     await cb.answer()
 
 
 @router.callback_query(F.data == "stop_add_dish")
 async def cb_stop_add_dish(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     stop_list = await get_stop_list()
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         "⛔ <b>Постановка БЛЮДА на стоп</b>\n\n"
         "Выберите блюдо, которое закончилось или временно не готовится:",
         reply_markup=kb.admin_stop_choose_dish_kb(stop_list),
@@ -2458,8 +2544,12 @@ async def cb_stop_add_dish(cb: CallbackQuery):
 
 @router.callback_query(F.data == "stop_add_top")
 async def cb_stop_add_top(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     stop_list = await get_stop_list()
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         "⛔ <b>Постановка ДОБАВКИ на стоп</b>\n\n"
         "Выберите добавку к шаурме, которая закончилась:",
         reply_markup=kb.admin_stop_choose_top_kb(stop_list),
@@ -2469,6 +2559,9 @@ async def cb_stop_add_top(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("stop_pick:"))
 async def cb_stop_pick(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     parts = cb.data.split(":")
     itype = parts[1]
     item_id = parts[2]
@@ -2477,7 +2570,8 @@ async def cb_stop_pick(cb: CallbackQuery):
     else:
         name = TOPPINGS_MAP.get(item_id, {}).get("name", item_id)
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         f"⛔ <b>Причина постановки на стоп</b>\n\n"
         f"Позиция: <b>{name}</b>\n\n"
         "Укажите причину для гостей и отчётов:",
@@ -2488,6 +2582,9 @@ async def cb_stop_pick(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("stop_set_r:"))
 async def cb_stop_set_reason(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     parts = cb.data.split(":")
     item_id = parts[1]
     reason_code = parts[2]
@@ -2497,7 +2594,8 @@ async def cb_stop_set_reason(cb: CallbackQuery, state: FSMContext):
     if reason_code == "custom":
         await state.set_state(AdminStopForm.waiting_for_reason)
         await state.update_data(stop_item_id=item_id, stop_item_type=itype, stop_item_name=name)
-        await cb.message.edit_text(
+        await safe_edit(
+            cb,
             f"✍️ <b>Введите свою причину постановки на стоп</b> для позиции <b>{name}</b>:\n\n"
             "Напишите текст причины ответным сообщением (гость увидит его при попытке заказать):",
             reply_markup=kb.cancel_reply_kb(),
@@ -2508,7 +2606,8 @@ async def cb_stop_set_reason(cb: CallbackQuery, state: FSMContext):
     reason = STOP_REASONS.get(reason_code, "Временно закончилось на кухне")
     await add_to_stop_list(item_id=item_id, item_name=name, item_type=itype, reason=reason)
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         f"✅ <b>Позиция поставлена на стоп!</b>\n\n"
         f"⛔ <b>{name}</b>\n"
         f"💬 Причина: <i>{reason}</i>\n\n"
@@ -2547,6 +2646,9 @@ async def admin_got_stop_reason(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "stop_unstop_menu")
 async def cb_stop_unstop_menu(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     stop_list = await get_stop_list()
     if not stop_list:
         await cb.message.edit_text(
@@ -2556,7 +2658,8 @@ async def cb_stop_unstop_menu(cb: CallbackQuery):
         await cb.answer()
         return
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         "🟢 <b>Снятие со стопа</b>\n\n"
         "Нажмите на позицию, которую хотите вернуть в продажу:",
         reply_markup=kb.admin_stop_unstop_kb(stop_list),
@@ -2566,12 +2669,16 @@ async def cb_stop_unstop_menu(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("stop_unstop_do:"))
 async def cb_stop_unstop_do(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     item_id = cb.data.split(":", 1)[1]
     name = TOPPINGS_MAP.get(item_id, {}).get("name") or ITEMS.get(item_id, {}).get("name", item_id)
     await remove_from_stop_list(item_id)
     stop_list = await get_stop_list()
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         f"🟢 <b>Позиция возвращена в продажу!</b>\n\n"
         f"«<b>{name}</b>» снова доступна для заказа гостями в меню.",
         reply_markup=kb.admin_stop_menu_kb(has_stopped=bool(stop_list)),
@@ -2643,10 +2750,17 @@ async def make_establishment_info_text() -> str:
 @router.message(F.text.in_({"ℹ️ Информация о заведении", "Информация о заведении", "ℹ️ Информация", "/cafe", "/dashboard"}))
 @router.callback_query(F.data == "admin_cafe_info")
 async def show_establishment_info(event: Message | CallbackQuery):
+    if isinstance(event, CallbackQuery) and not _is_admin_context(event):
+        await event.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     text = await make_establishment_info_text()
     markup = kb.admin_cafe_info_kb()
     if isinstance(event, CallbackQuery):
-        await event.message.edit_text(text, reply_markup=markup)
+        try:
+            await event.message.edit_text(text, reply_markup=markup)
+        except Exception:
+            # Сообщение могло быть без текста (фото/документ) — шлём новое
+            await event.message.answer(text, reply_markup=markup)
         await event.answer()
     else:
         await event.answer(text, reply_markup=markup)
@@ -2694,6 +2808,9 @@ async def _report_text() -> str:
 
 @router.callback_query(F.data == "admin_report")
 async def cb_admin_report(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     await cb.message.answer(await _report_text(), reply_markup=kb.admin_kb())
     await cb.answer()
 
@@ -2735,6 +2852,9 @@ async def msg_search_phone_btn(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data == "admin_search_phone")
 async def cb_admin_search_phone(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     await state.set_state(AdminSearchForm.waiting_for_phone)
     await send_step_msg(
         state,
@@ -2926,6 +3046,9 @@ async def _show_admin_search_results(chat_id: int, bot: Bot, query: str):
 
 @router.callback_query(F.data.startswith("receipt:"))
 async def cb_print_receipt(cb: CallbackQuery, bot: Bot):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     order_id = int(cb.data.split(":", 1)[1])
     order = await get_order(order_id)
     if not order:
@@ -2952,6 +3075,9 @@ async def cb_print_receipt(cb: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "admin_export_excel")
 async def cb_export_excel(cb: CallbackQuery, bot: Bot):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     await cb.answer("Формирую Excel отчёт...")
     orders = await get_all_orders_for_export(limit=1000)
     if not orders:
@@ -2965,7 +3091,7 @@ async def cb_export_excel(cb: CallbackQuery, bot: Bot):
     await cb.message.answer_document(
         file_to_send,
         caption=(
-            f"📊 <b>Отчёт по заказам и выручке кафедры «ПивДонер»</b>\n\n"
+            f"📊 <b>Отчёт по заказам и выручке кафе «ПивДонер»</b>\n\n"
             f"📦 Всего заказов в файле: <b>{len(orders)}</b>\n"
             f"💰 Общая выручка: <b>{total_rev:.2f} Br</b>\n\n"
             f"Таблица оформлена со стилями, формулами и авто-шириной колонок."
@@ -2978,6 +3104,9 @@ async def cb_export_excel(cb: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "admin_reviews_stats")
 async def cb_admin_reviews_stats(cb: CallbackQuery):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только персонал кухни.", show_alert=True)
+        return
     stats, recent = await get_overall_reviews_stats()
     total = stats.get("total_count") or 0
     avg = stats.get("avg_rating") or 0.0
@@ -3012,7 +3141,7 @@ async def cb_admin_reviews_stats(cb: CallbackQuery):
     else:
         text += "<i>Пока нет подробных оценок от гостей.</i>"
 
-    await cb.message.edit_text(text, reply_markup=kb.admin_kb())
+    await safe_edit(cb, text, reply_markup=kb.admin_kb())
     await cb.answer()
 
 
@@ -3034,6 +3163,9 @@ async def msg_start_broadcast(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_broadcast")
 async def cb_start_broadcast(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin_context(cb):
+        await cb.answer("⚠️ Только администратор.", show_alert=True)
+        return
     await state.set_state(BroadcastForm.waiting_for_content)
     await cb.message.answer(
         "📢 <b>Таргетированная рассылка от владельца</b>\n\n"
@@ -3164,6 +3296,19 @@ async def cb_review_rating(cb: CallbackQuery, state: FSMContext, bot: Bot):
     order_id = int(parts[1])
     rating = int(parts[2])
     user_id = cb.from_user.id
+
+    # Защита: оценить можно только свой заказ и только один раз
+    order = await get_order(order_id)
+    if not order or order.get("user_id") != user_id:
+        await cb.answer("⚠️ Этот опрос относится к чужому заказу.", show_alert=True)
+        return
+    if await has_review_for_order(order_id, user_id):
+        await cb.answer("Вы уже оценили этот заказ. Спасибо!", show_alert=True)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
 
     await create_review(order_id=order_id, user_id=user_id, rating=rating)
 

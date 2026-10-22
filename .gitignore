@@ -7,4 +7,9 @@ venv/
 qr_bot.png
 reports/
 *.xlsx
+*.session
+*.session-journal
+bot.log
+bot_stdout.log
+bot_stderr.log
 
