@@ -189,6 +189,8 @@ def cart_text(cart: dict) -> str:
     """cart: {item_id: qty} -> текст корзины и сумма"""
     lines, total = [], 0.0
     for iid, qty in cart.items():
+        if iid not in ITEMS or qty <= 0:
+            continue
         item = ITEMS[iid]
         s = item["price"] * qty
         total += s

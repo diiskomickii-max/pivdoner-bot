@@ -92,7 +92,6 @@ async def main():
     try:
         await bot.set_my_commands([
             BotCommand(command="start", description="🏠 Главное меню / Регистрация"),
-            BotCommand(command="webapp", description="🚀 Меню в Mini App"),
             BotCommand(command="help", description="📌 Инструкция ко всем кнопкам"),
             BotCommand(command="guide", description="📖 Руководство покупателя"),
             BotCommand(command="menu", description="🍔 Меню кафе «ПивДонер»"),

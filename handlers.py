@@ -1255,8 +1255,8 @@ async def got_address_location(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(OrderForm.address, F.text)
 async def got_address_text(message: Message, state: FSMContext, bot: Bot):
-    await delete(message)
     if message.text.strip() == "❌ Отмена":
+        await delete(message)
         await cancel_order_flow(message.chat.id, state, bot)
         return
     addr_str = message.text.strip()
@@ -1273,38 +1273,46 @@ async def got_address_text(message: Message, state: FSMContext, bot: Bot):
 
 
 async def _process_delivery_address(chat_id: int, addr_str: str, state: FSMContext, bot: Bot):
-    data = await state.get_data()
-    cart = data.get("cart", {})
-    _, items_total = cart_text(cart)
-    deliv_info = calculate_yandex_delivery(addr_str, items_total)
+    try:
+        data = await state.get_data()
+        cart = data.get("cart", {})
+        _, items_total = cart_text(cart)
+        deliv_info = calculate_yandex_delivery(addr_str, items_total)
 
-    deliv_cost = deliv_info["cost"]
-    eta = deliv_info["eta_minutes"]
-    time_str = f"~{eta} мин (Яндекс Go)"
+        deliv_cost = deliv_info["cost"]
+        eta = deliv_info["eta_minutes"]
+        time_str = f"~{eta} мин (Яндекс Go)"
 
-    await state.update_data(
-        delivery_type="yandex",
-        delivery_address=addr_str,
-        delivery_cost=deliv_cost,
-        delivery_eta=eta,
-        pickup_time=time_str,
-    )
-    await state.set_state(OrderForm.comment)
+        await state.update_data(
+            delivery_type="yandex",
+            delivery_address=addr_str,
+            delivery_cost=deliv_cost,
+            delivery_eta=eta,
+            pickup_time=time_str,
+        )
+        await state.set_state(OrderForm.comment)
 
-    cost_str = "🎉 <b>Бесплатно</b> (заказ от 35 Br)" if deliv_info["is_free"] else f"<b>{deliv_cost:.2f} Br</b>"
+        cost_str = "🎉 <b>Бесплатно</b> (заказ от 35 Br)" if deliv_info["is_free"] else f"<b>{deliv_cost:.2f} Br</b>"
 
-    await send_step_msg(
-        state,
-        bot,
-        chat_id,
-        f"🚕 <b>Тариф Яндекс Доставки рассчитан!</b>\n\n"
-        f"📍 Адрес доставки: <b>{addr_str}</b>\n"
-        f"🛵 Стоимость доставки: {cost_str}\n"
-        f"⏱ Время доставки: <b>~{eta} мин</b> (курьер на авто)\n\n"
-        "✍️ <b>Комментарий курьеру или кухне?</b>\n"
-        "(Например: домофон 42, 3 этаж, без лука или напишите «-» если без пожеланий):",
-        reply_markup=kb.cancel_reply_kb(),
-    )
+        await send_step_msg(
+            state,
+            bot,
+            chat_id,
+            f"🚕 <b>Тариф Яндекс Доставки рассчитан!</b>\n\n"
+            f"📍 Адрес доставки: <b>{addr_str}</b>\n"
+            f"🛵 Стоимость доставки: {cost_str}\n"
+            f"⏱ Время доставки: <b>~{eta} мин</b> (курьер на авто)\n\n"
+            "✍️ <b>Комментарий курьеру или кухне?</b>\n"
+            "(Например: домофон 42, 3 этаж, без лука или напишите «-» если без пожеланий):",
+            reply_markup=kb.cancel_reply_kb(),
+        )
+    except Exception as e:
+        logging.exception("Error processing delivery address: %s", e)
+        await bot.send_message(
+            chat_id,
+            "⚠️ Не удалось рассчитать адрес доставки. Пожалуйста, напишите улицу и номер дома ещё раз:",
+            reply_markup=kb.address_request_kb(),
+        )
 
 
 @router.callback_query(OrderForm.pickup_time, F.data.startswith("time:"))
@@ -1364,8 +1372,8 @@ async def got_custom_time(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(OrderForm.comment)
 async def got_comment(message: Message, state: FSMContext, bot: Bot):
-    await delete(message)
     if message.text.strip() == "❌ Отмена":
+        await delete(message)
         await cancel_order_flow(message.chat.id, state, bot)
         return
 
@@ -2297,7 +2305,6 @@ async def got_webapp_data(message: Message, state: FSMContext, bot: Bot):
 @router.message(F.text.in_({"🚀 Интерактивное меню (Mini App)", "🚀 Меню в Mini App", "🚀 Меню (Mini App)", "/webapp", "/app"}))
 async def msg_open_webapp(message: Message):
     await message.answer(
-        "🍔 <b>Интерактивная витрина «ПивДонер» (Telegram Mini App)</b>\n\n"
-        "Нажмите кнопку ниже, чтобы открыть красивое меню с фотографиями, составом блюд и быстрой сборкой корзины:",
-        reply_markup=kb.webapp_kb(),
+        "💡 Функция Mini App вынесена на отдельное тестирование в специальном боте.",
+        reply_markup=kb.main_menu(),
     )
