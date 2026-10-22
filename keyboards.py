@@ -14,12 +14,11 @@ from menu import ITEMS, MENU, fmt_price
 def main_menu(is_admin_or_demo: bool = True) -> ReplyKeyboardMarkup:
     """Постоянная панель быстрых действий (кнопки под строкой ввода)."""
     buttons = [
-        [KeyboardButton(text="🚀 Меню в Mini App", web_app=WebAppInfo(url=WEBAPP_URL))],
         [KeyboardButton(text="🛒 Оформить заказ")],
         [KeyboardButton(text="🍔 Меню"), KeyboardButton(text="🧺 Корзина")],
-        [KeyboardButton(text="👤 Личный кабинет"), KeyboardButton(text="🎁 Пригласи друга (+2 Br)")],
-        [KeyboardButton(text="📜 Мои заказы"), KeyboardButton(text="📍 Адрес и инфо")],
-        [KeyboardButton(text="🚨 Подать жалобу"), KeyboardButton(text="🎲 Игра с бонусами")],
+        [KeyboardButton(text="👤 Личный кабинет"), KeyboardButton(text="📜 Мои заказы")],
+        [KeyboardButton(text="📍 Адрес и инфо"), KeyboardButton(text="🎲 Игра с бонусами")],
+        [KeyboardButton(text="🚨 Подать жалобу")],
     ]
     if is_admin_or_demo:
         buttons.append([
@@ -55,7 +54,6 @@ def cancel_reply_kb() -> ReplyKeyboardMarkup:
 
 def quick_actions_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="🚀 Интерактивное меню (Mini App)", web_app=WebAppInfo(url=WEBAPP_URL)))
     kb.row(InlineKeyboardButton(text="🛒 Оформить заказ", callback_data="quick_order"))
     kb.row(
         InlineKeyboardButton(text="🍔 Меню", callback_data="menu"),
