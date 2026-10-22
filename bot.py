@@ -44,8 +44,11 @@ async def handle_yandex_webhook(request):
     """Принимает вебхук от платёжной системы / сервиса Яндекс Доставка."""
     try:
         data = await request.json()
-        order_id = int(data.get("order_id", 0))
-        status = data.get("status", "")
+        try:
+            order_id = int(data.get("order_id", 0))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid order_id"}, status=400)
+        status = str(data.get("status", "")).strip().lower()
         from db import set_order_payment, get_order
         import keyboards as kb
         from handlers import _send_order_to_group
@@ -90,16 +93,19 @@ async def handle_webapp(request):
 
 
 async def keep_alive_task():
-    """Фоновый пинг для бесплатных облачных платформ (Render и др.), чтобы сервис не засыпал."""
-    url = os.getenv("RENDER_EXTERNAL_URL")
+    """Фоновый пинг для бесплатных облачных платформ (Render/Railway и др.),
+    чтобы сервис не засыпал. URL берётся из RENDER_EXTERNAL_URL или SELF_URL."""
+    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("SELF_URL")
     if not url:
+        logging.info("Keep-alive disabled: RENDER_EXTERNAL_URL/SELF_URL is not set.")
         return
+    url = url.rstrip("/")
     await asyncio.sleep(60)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                await session.get(f"{url}/health")
-                logging.info("Keep-alive ping sent to %s", url)
+                async with session.get(f"{url}/health", timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    logging.info("Keep-alive ping to %s -> %s", url, resp.status)
             except Exception as e:
                 logging.warning("Keep-alive ping failed: %s", e)
             await asyncio.sleep(600)  # каждые 10 минут
@@ -160,5 +166,24 @@ async def main():
     await dp.start_polling(bot)
 
 
+async def run_with_restart():
+    """Перезапускает бота при сетевых сбоях — бесконечный цикл для работы 24/7."""
+    retry = 0
+    while True:
+        try:
+            await main()
+            break  # корректная остановка
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            retry += 1
+            wait = min(60, 5 * retry)
+            logging.exception("Бот упал с ошибкой (%s). Перезапуск #%s через %s сек...", e, retry, wait)
+            await asyncio.sleep(wait)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(run_with_restart())
+    except KeyboardInterrupt:
+        pass

@@ -118,6 +118,15 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN broadcast_consent INTEGER DEFAULT NULL")
         except Exception:
             pass
+        # миграция: id карточки заказа в группе кухни (для защиты от дублей)
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN group_msg_id INTEGER")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN group_chat_id INTEGER")
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -164,6 +173,16 @@ async def set_order_status(order_id, status):
 async def set_order_payment(order_id, payment):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE orders SET payment=? WHERE id=?", (payment, order_id))
+        await db.commit()
+
+
+async def set_order_group_msg(order_id: int, chat_id: int, msg_id: int):
+    """Сохраняет id карточки заказа в группе кухни для защиты от дублей."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET group_chat_id=?, group_msg_id=? WHERE id=?",
+            (chat_id, msg_id, order_id),
+        )
         await db.commit()
 
 
@@ -374,6 +393,16 @@ async def search_orders_by_phone(phone_query: str):
 
 
 # ---------- Отзывы (NPS) ----------
+
+async def has_review_for_order(order_id: int, user_id: int) -> bool:
+    """Проверяет, оставлял ли гость уже отзыв по этому заказу (защита от дублей)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT 1 FROM reviews WHERE order_id=? AND user_id=? LIMIT 1",
+            (order_id, user_id),
+        )
+        return (await cur.fetchone()) is not None
+
 
 async def create_review(order_id: int, user_id: int, rating: int, comment: str = ""):
     now = datetime.now().isoformat(timespec="seconds")
