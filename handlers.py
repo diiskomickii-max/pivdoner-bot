@@ -1921,14 +1921,20 @@ async def _show_admin_search_results(chat_id: int, bot: Bot, query: str):
             card += f"\n💬 <b>Пожелание:</b> <i>{o['comment']}</i>"
         lines.append(card)
 
-    full_text = "\n".join(lines)
-    if len(full_text) > 4000:
-        chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
-        for idx, chunk in enumerate(chunks):
-            markup = kb.admin_search_again_kb() if idx == len(chunks) - 1 else None
-            await bot.send_message(chat_id, chunk, reply_markup=markup)
-    else:
-        await bot.send_message(chat_id, full_text, reply_markup=kb.admin_search_again_kb())
+    messages_to_send = []
+    current_chunk = header
+    for card in lines[1:]:
+        if len(current_chunk) + len(card) + 2 > 3500:
+            messages_to_send.append(current_chunk)
+            current_chunk = card
+        else:
+            current_chunk += "\n" + card
+    if current_chunk:
+        messages_to_send.append(current_chunk)
+
+    for idx, msg_text in enumerate(messages_to_send):
+        markup = kb.admin_search_again_kb() if idx == len(messages_to_send) - 1 else None
+        await bot.send_message(chat_id, msg_text, reply_markup=markup)
 
 
 # ---------- Функция 1: Автоматическая печать чеков на кухне (58/80 мм) ----------
