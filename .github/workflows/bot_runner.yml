@@ -1,39 +1,58 @@
-name: PivDoner Bot — Keep-Alive & Health Check
-
-# ⚠️ ВАЖНО: GitHub Actions НЕ подходит для запуска Telegram polling-бота 24/7:
-#   • Job живёт максимум ~6 часов и убивается раньше по timeout-minutes
-#   • SQLite-файл не персистентен между ранами — база заказов теряется
-#   • Параллельный polling конфликтует с основным инстансом бота
-#
-# Правильный деплой 24/7: Render / Railway / VPS (см. DEPLOY.md).
-# Этот workflow — только будильник: пингует /health endpoint,
-# чтобы бесплатный хостинг не усыпал сервис, и проверяет, что бот жив.
+name: PivDoner Bot 24/7 Cloud Runner
 
 on:
+  push:
+    branches: [ master, main ]
   schedule:
-    # Пинг каждые 10 минут — Render засыпает после 15 минут неактивности
-    - cron: '*/10 * * * *'
+    # Перезапуск каждые 5 часов для непрерывной 24/7 работы
+    - cron: '0 */5 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: pivdoner-bot
+  cancel-in-progress: true
+
 jobs:
-  keep-alive:
+  run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350
+
     steps:
-      - name: Ping bot health endpoint
-        env:
-          HEALTH_URL: ${{ secrets.BOT_HEALTH_URL }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Restore SQLite Database Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: bot.db
+          key: bot-db-${{ github.run_id }}
+          restore-keys: |
+            bot-db-
+
+      - name: Install dependencies
         run: |
-          if [ -z "$HEALTH_URL" ]; then
-            echo "⚠️ Secret BOT_HEALTH_URL не задан — пропуск пинга."
-            echo "Добавь его в Settings → Secrets → Actions, например: https://pivdoner-bot.onrender.com/health"
-            exit 0
-          fi
-          echo "Пингую $HEALTH_URL ..."
-          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$HEALTH_URL" || echo "000")
-          echo "HTTP код ответа: $code"
-          if [ "$code" != "200" ]; then
-            echo "❌ Бот не отвечает! Проверь хостинг."
-            exit 1
-          fi
-          echo "✅ Бот жив и отвечает."
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Telegram Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MANAGER_CHAT_ID: ${{ secrets.MANAGER_CHAT_ID }}
+          PAYMENT_URL: ${{ secrets.PAYMENT_URL }}
+          PAYMENT_ENABLED: ${{ secrets.PAYMENT_ENABLED }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python bot.py
+
+      - name: Save SQLite Database Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: bot.db
+          key: bot-db-${{ github.run_id }}
