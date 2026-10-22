@@ -8,7 +8,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import WEBAPP_URL
-from menu import ITEMS, MENU, fmt_price
+from menu import ITEMS, MENU, TOPPINGS, fmt_price, parse_cart_item
 
 
 def main_menu(is_admin_or_demo: bool = True) -> ReplyKeyboardMarkup:
@@ -66,7 +66,16 @@ def quick_actions_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def profile_kb(is_verified: bool = True) -> InlineKeyboardMarkup:
+def broadcast_consent_kb() -> InlineKeyboardMarkup:
+    """Запрос согласия на получение рекламных рассылок при первом старте."""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✅ Да, хочу получать акции", callback_data="bcast_consent:1"))
+    kb.row(InlineKeyboardButton(text="❌ Нет, не присылать рассылки", callback_data="bcast_consent:0"))
+    return kb.as_markup()
+
+
+def profile_kb(is_verified: bool = True, broadcast_consent: int = 1) -> InlineKeyboardMarkup:
+    """Клавиатура личного кабинета с переключателем согласия на рассылку."""
     kb = InlineKeyboardBuilder()
     if is_verified:
         kb.row(
@@ -80,6 +89,14 @@ def profile_kb(is_verified: bool = True) -> InlineKeyboardMarkup:
     kb.row(
         InlineKeyboardButton(text="🎁 Реферальная ссылка («Пригласи друга»)", callback_data="referral_link")
     )
+    
+    bcast_btn = (
+        InlineKeyboardButton(text="🔔 Рассылка акций: Включена", callback_data="toggle_bcast:0")
+        if broadcast_consent == 1
+        else InlineKeyboardButton(text="🔕 Рассылка акций: Отключена", callback_data="toggle_bcast:1")
+    )
+    kb.row(bcast_btn)
+
     kb.row(
         InlineKeyboardButton(text="📜 История заказов", callback_data="quick_history"),
         InlineKeyboardButton(text="🎲 Сыграть в кубик", callback_data="dice_menu"),
@@ -129,8 +146,11 @@ def order_phone_choice_kb(saved_phone: str) -> InlineKeyboardMarkup:
 
 
 def categories_kb() -> InlineKeyboardMarkup:
+    """Список категорий меню. 'Добавки в шаурму' исключены — они настраиваются внутри шаурмы."""
     kb = InlineKeyboardBuilder()
     for cat in MENU:
+        if cat == "🧀 Добавки в шаурму":
+            continue  # Исключаем из общего списка категорий
         kb.row(InlineKeyboardButton(text=cat, callback_data=f"cat:{cat}"))
     kb.row(InlineKeyboardButton(text="🧺 Корзина", callback_data="cart"))
     return kb.as_markup()
@@ -158,9 +178,10 @@ def item_kb(item_id: str, qty: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=f"{qty} шт", callback_data="noop"),
         InlineKeyboardButton(text="➕", callback_data=f"inc:{item_id}"),
     )
-    if item_id.startswith("doner_") or "Донер" in ITEMS.get(item_id, {}).get("category", ""):
+    # Если блюдо — шаурма/донер, даём кнопку настройки добавок прямо к ней
+    if item_id.startswith("doner_") or "Донер" in ITEMS.get(item_id, {}).get("name", ""):
         kb.row(
-            InlineKeyboardButton(text="🧀 Добавить добавки к шаурме", callback_data="cat:🧀 Добавки в шаурму"),
+            InlineKeyboardButton(text="🧀 Выбрать добавки к этой шаурме", callback_data=f"top_sel:{item_id}"),
         )
     kb.row(
         InlineKeyboardButton(text="⬅️ Назад в категорию", callback_data=f"cat:{ITEMS[item_id]['category']}"),
@@ -169,13 +190,47 @@ def item_kb(item_id: str, qty: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def toppings_selector_kb(doner_id: str, mask: str = "") -> InlineKeyboardMarkup:
+    """
+    Интерактивный конструктор добавок к конкретной шаурме.
+    mask: строка выбранных цифр-индексов в TOPPINGS, например '02' (сыр + халапеньо).
+    """
+    kb = InlineKeyboardBuilder()
+    base_item = ITEMS.get(doner_id, {})
+    total_price = base_item.get("price", 0.0)
+
+    # Список доступных добавок в виде кнопок с отметкой [✓] / [▫️]
+    for idx, top in enumerate(TOPPINGS):
+        is_selected = str(idx) in mask
+        prefix = "✅" if is_selected else "▫️"
+        label = f"{prefix} {top['name']} (+{top['price']:.2f} Br)"
+        if is_selected:
+            total_price += top["price"]
+        kb.row(InlineKeyboardButton(text=label, callback_data=f"top_t:{doner_id}:{idx}:{mask}"))
+
+    # Кнопка добавления настроенной шаурмы в корзину
+    kb.row(
+        InlineKeyboardButton(
+            text=f"🛒 Добавить в корзину ({total_price:.2f} Br)",
+            callback_data=f"top_add:{doner_id}:{mask}",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад к блюду", callback_data=f"item:{doner_id}"),
+        InlineKeyboardButton(text="🧺 В корзину", callback_data="cart"),
+    )
+    return kb.as_markup()
+
+
 def cart_kb(cart: dict) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for iid, qty in cart.items():
-        item = ITEMS[iid]
+        parsed = parse_cart_item(iid)
+        name = parsed["name"] if parsed else ITEMS.get(iid, {}).get("name", iid)
+        display_name = name if len(name) <= 22 else name[:20] + "…"
         kb.row(
             InlineKeyboardButton(text="➖", callback_data=f"cdec:{iid}"),
-            InlineKeyboardButton(text=f"{item['name']} ×{qty}", callback_data="noop"),
+            InlineKeyboardButton(text=f"{display_name} ×{qty}", callback_data="noop"),
             InlineKeyboardButton(text="➕", callback_data=f"cinc:{iid}"),
             InlineKeyboardButton(text="🗑", callback_data=f"cdel:{iid}"),
         )
@@ -226,32 +281,65 @@ def payment_method_kb(order_id: int, pay_url: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def yandex_delivery_payment_kb(eda_url: str, delivery_cab_url: str) -> InlineKeyboardMarkup:
-    """Оплата и оформление курьерской доставки через Яндекс (только онлайн-переход, без лишних кнопок)."""
+def yandex_delivery_payment_kb(order_id: int, eda_url: str, delivery_cab_url: str) -> InlineKeyboardMarkup:
+    """Оплата и оформление курьерской доставки через Яндекс."""
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="💳 Оплатить в Яндекс Еде / Go", url=eda_url))
     kb.row(InlineKeyboardButton(text="🚚 Кабинет Яндекс Доставки", url=delivery_cab_url))
+    # Тестовые кнопки эмуляции ответа Яндекс API
+    kb.row(
+        InlineKeyboardButton(text="🧪 Тест: Оплата прошла", callback_data=f"yandex_pay_sim:ok:{order_id}"),
+        InlineKeyboardButton(text="🧪 Тест: Оплата не прошла", callback_data=f"yandex_pay_sim:fail:{order_id}"),
+    )
     return kb.as_markup()
 
 
-def status_kb(order_id: int, status: str = "new", payment: str = "none") -> InlineKeyboardMarkup:
+def yandex_payment_failed_kb(order_id: int, eda_url: str) -> InlineKeyboardMarkup:
+    """Клавиатура при неудачной оплате в сервисе Яндекс."""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔄 Попробовать оплатить снова", url=eda_url))
+    kb.row(InlineKeyboardButton(text="🏃 Переключить на самовывоз (оплата на месте)", callback_data=f"yandex_to_pickup:{order_id}"))
+    kb.row(InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_guest:{order_id}"))
+    kb.row(InlineKeyboardButton(text="🧪 Тест: Оплата прошла", callback_data=f"yandex_pay_sim:ok:{order_id}"))
+    return kb.as_markup()
+
+
+def admin_cancel_reasons_kb(order_id: int) -> InlineKeyboardMarkup:
+    """Выбор причины отмены заказа администратором."""
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🥩 Закончились ингредиенты", callback_data=f"cancel_r:{order_id}:ingredients"))
+    kb.row(InlineKeyboardButton(text="⚡ Отключение электричества / форс-мажор", callback_data=f"cancel_r:{order_id}:power"))
+    kb.row(InlineKeyboardButton(text="⏳ Большая загрузка кухни (>60 мин)", callback_data=f"cancel_r:{order_id}:overload"))
+    kb.row(InlineKeyboardButton(text="📞 Не удалось связаться с клиентом", callback_data=f"cancel_r:{order_id}:unreachable"))
+    kb.row(InlineKeyboardButton(text="✍️ Написать свою причину", callback_data=f"cancel_r:{order_id}:custom"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад (Не отменять)", callback_data=f"cancel_r:{order_id}:back"))
+    return kb.as_markup()
+
+
+def status_kb(order_id: int, status: str = "new", payment: str = "none", delivery_type: str = "pickup") -> InlineKeyboardMarkup:
     """Последовательные кнопки управления заказом для администратора/повара."""
     kb = InlineKeyboardBuilder()
 
     if status == "new":
         kb.row(InlineKeyboardButton(text="✅ Принять заказ", callback_data=f"st:{order_id}:accepted"))
-        kb.row(InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"st:{order_id}:cancelled"))
+        kb.row(InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"st_cancel:{order_id}"))
     elif status == "accepted":
         kb.row(InlineKeyboardButton(text="🔥 Начать готовить", callback_data=f"st:{order_id}:cooking"))
         kb.row(
             InlineKeyboardButton(text="🛍 Сразу готов", callback_data=f"st:{order_id}:ready"),
-            InlineKeyboardButton(text="❌ Отменить", callback_data=f"st:{order_id}:cancelled"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"st_cancel:{order_id}"),
         )
     elif status == "cooking":
         kb.row(InlineKeyboardButton(text="🛍 Заказ готов!", callback_data=f"st:{order_id}:ready"))
-        kb.row(InlineKeyboardButton(text="❌ Отменить", callback_data=f"st:{order_id}:cancelled"))
+        kb.row(InlineKeyboardButton(text="❌ Отменить", callback_data=f"st_cancel:{order_id}"))
     elif status == "ready":
-        kb.row(InlineKeyboardButton(text="🏁 Выдан гостю (Завершить)", callback_data=f"st:{order_id}:completed"))
+        if delivery_type == "yandex":
+            kb.row(InlineKeyboardButton(text="🚗 Передать заказ курьеру", callback_data=f"st:{order_id}:to_courier"))
+        else:
+            kb.row(InlineKeyboardButton(text="🏁 Выдан гостю (Завершить)", callback_data=f"st:{order_id}:completed"))
+        kb.row(InlineKeyboardButton(text="❌ Отменить", callback_data=f"st_cancel:{order_id}"))
+    elif status == "to_courier":
+        kb.row(InlineKeyboardButton(text="🏁 Подтвердить доставку (Завершить)", callback_data=f"st:{order_id}:completed"))
 
     if payment != "paid" and status not in ("completed", "cancelled"):
         kb.row(InlineKeyboardButton(text="💰 Оплата подтверждена", callback_data=f"payok:{order_id}"))

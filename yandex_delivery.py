@@ -225,7 +225,12 @@ async def run_yandex_delivery_simulation(
                             chat_id=admin_chat_id,
                             message_id=admin_msg_id,
                             text=make_order_text(updated_order, is_demo=DEMO_MODE),
-                            reply_markup=kb.status_kb(order_id, status="completed", payment=updated_order.get("payment", "none")),
+                            reply_markup=kb.status_kb(
+                                order_id,
+                                status="completed",
+                                payment=updated_order.get("payment", "none"),
+                                delivery_type=updated_order.get("delivery_type", "yandex"),
+                            ),
                         )
                 except Exception:
                     pass
