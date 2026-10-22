@@ -13,12 +13,22 @@ from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, Message
 
 import keyboards as kb
 from config import (
+    ADMIN_IDS,
     DEMO_MODE,
     MANAGER_CHAT_ID,
     PAYMENT_ENABLED,
     PAYMENT_URL,
     SELLER_CONTACT,
 )
+
+
+def is_admin_user(user_id: int) -> bool:
+    """Проверяет, является ли пользователь администратором."""
+    if not user_id:
+        return False
+    if DEMO_MODE:
+        return True
+    return user_id in ADMIN_IDS
 from db import (
     add_bonus,
     create_complaint,
@@ -291,12 +301,14 @@ async def send_and_pin_instruction(chat_id: int, bot: Bot, reply_markup=None):
 
 
 async def send_main_greeting(message: Message, name: str, bot: Bot = None):
-    """Главное приветствие для зарегистрированного пользователя."""
+    """Главное приветствие для зарегистрированного пользователя (разное для гостя и админа)."""
     b = bot or message.bot
-    demo_note = (
-        "\n\n<b>🧪 Включен Демо-режим:</b>\n"
-        "Заказ после оформления придёт прямо вам в этот же чат с кнопками повара/администратора для принятия и управления!"
-        if DEMO_MODE else ""
+    uid = message.from_user.id if message.from_user else 0
+    is_admin = is_admin_user(uid)
+    admin_note = (
+        "\n\n⚙️ <i>Вы авторизованы как администратор. Кнопки управления кафе доступны на панели внизу. Все подтверждённые заказы поступают в группу кухни.</i>"
+        if is_admin
+        else ""
     )
     await message.answer(
         f"👋 Привет, {name}!\n\n"
@@ -305,8 +317,8 @@ async def send_main_greeting(message: Message, name: str, bot: Bot = None):
         "🕐 Забери к выбранному времени по адресу:\n"
         f"📍 {CAFE['address']}\n"
         f"📞 {CAFE['phone']}"
-        + demo_note,
-        reply_markup=kb.main_menu(),
+        + admin_note,
+        reply_markup=kb.main_menu(user_or_admin=uid),
     )
     await message.answer("Быстрые действия:", reply_markup=kb.quick_actions_kb())
     if DEMO_MODE:
@@ -855,13 +867,15 @@ async def show_history(chat_id: int, user_id: int, bot: Bot, state: FSMContext =
         text = "📜 <b>История заказов:</b>\n\nУ вас пока нет заказов. Выберите что-нибудь вкусное в меню!"
     else:
         text = "📜 <b>История ваших заказов:</b>\n\n"
-        for o in orders:
+        for row in orders:
+            o = dict(row)
             dt = o["created_at"][:16].replace("T", " ")
-            st = STATUS_TEXT.get(o["status"], o["status"])
-            pay = PAYMENT_TEXT.get(o["payment"], o["payment"])
+            st = STATUS_TEXT.get(o.get("status", "new"), o.get("status", "new"))
+            pay = PAYMENT_TEXT.get(o.get("payment", "none"), o.get("payment", "none"))
             deliv = "🚕 Яндекс Доставка" if o.get("delivery_type") == "yandex" else "🏃 Самовывоз"
-            text += f"№{o['id']} · {dt} · <b>{o['total']:.2f} Br</b> ({deliv})\n  {o['items']}\n  📊 {st} · {pay}\n\n"
+            text += f"№{o['id']} · {dt} · <b>{o.get('total', 0.0):.2f} Br</b> ({deliv})\n  {o.get('items', '')}\n  📊 {st} · {pay}\n\n"
 
+    kb_markup = kb.categories_kb()
     kb_markup = kb.categories_kb()
     if state:
         await send_step_msg(state, bot, chat_id, text, reply_markup=kb_markup)
@@ -2093,8 +2107,60 @@ async def cb_payok(cb: CallbackQuery, bot: Bot):
             pass
 
 
+@router.message(Command(commands=["active", "orders"]))
+async def cmd_group_active(message: Message):
+    orders = await get_active_orders()
+    if not orders:
+        await message.answer("📋 <b>На кухне нет активных заказов.</b>\nВсе заказы выданы или завершены!")
+        return
+    text = f"📋 <b>Активные заказы в работе ({len(orders)} шт):</b>\n\n"
+    for row in orders:
+        o = dict(row)
+        pay = PAYMENT_TEXT.get(o.get("payment", "none"), o.get("payment", "none"))
+        st = STATUS_TEXT.get(o.get("status", "new"), o.get("status", "new"))
+        deliv = "🚕 Яндекс Доставка" if o.get("delivery_type") == "yandex" else "🏃 Самовывоз"
+        text += (
+            f"<b>Заказ №{o['id']}</b> ({deliv})\n"
+            f"⏱ {o.get('pickup_time', '')} · 💰 {o.get('total', 0.0):.2f} Br\n"
+            f"📌 {st} · 💳 {pay}\n"
+            f"🛒 {o.get('items', '')}\n\n"
+        )
+    await message.answer(text)
+@router.message(Command("report"))
+async def cmd_group_report(message: Message):
+    text = await _report_text()
+    await message.answer(text)
+
+
+@router.message(Command("excel"))
+async def cmd_group_excel(message: Message, bot: Bot):
+    try:
+        from excel_report import generate_excel_report
+        file_path = await generate_excel_report()
+        from aiogram.types import FSInputFile
+        doc = FSInputFile(file_path, filename=os.path.basename(file_path))
+        await bot.send_document(
+            message.chat.id,
+            doc,
+            caption="📑 <b>Сводный отчёт по заказам кафе «ПивДонер» (.xlsx)</b>",
+        )
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка формирования отчёта: {e}")
+
+
+@router.message(Command("id"))
+async def cmd_show_id(message: Message):
+    await message.answer(
+        f"ℹ️ <b>Информация о чате:</b>\n"
+        f"• ID чата: <code>{message.chat.id}</code>\n"
+        f"• Тип: <b>{message.chat.type}</b>\n"
+        f"• Ваш ID: <code>{message.from_user.id}</code>"
+    )
+
+
 # ---------- Панель администратора ----------
 
+@router.callback_query(F.data == "admin_active")
 @router.callback_query(F.data == "admin_active")
 async def cb_admin_active(cb: CallbackQuery):
     orders = await get_active_orders()
@@ -2105,15 +2171,16 @@ async def cb_admin_active(cb: CallbackQuery):
         )
     else:
         text = "📋 <b>Активные заказы в работе:</b>\n\n"
-        for o in orders:
-            pay = PAYMENT_TEXT.get(o["payment"], o["payment"])
-            st = STATUS_TEXT.get(o["status"], o["status"])
+        for row in orders:
+            o = dict(row)
+            pay = PAYMENT_TEXT.get(o.get("payment", "none"), o.get("payment", "none"))
+            st = STATUS_TEXT.get(o.get("status", "new"), o.get("status", "new"))
             deliv = "🚕 Яндекс" if o.get("delivery_type") == "yandex" else "🏃 Самовывоз"
             text += (
                 f"<b>Заказ №{o['id']}</b> ({deliv})\n"
-                f"⏱ Время: {o['pickup_time']} · 💰 {o['total']:.2f} Br\n"
+                f"⏱ Время: {o.get('pickup_time', '')} · 💰 {o.get('total', 0.0):.2f} Br\n"
                 f"📌 Статус: <b>{st}</b> · 💳 {pay}\n"
-                f"🛒 Блюда: {o['items']}\n\n"
+                f"🛒 Блюда: {o.get('items', '')}\n\n"
             )
     await cb.message.answer(text, reply_markup=kb.admin_kb())
     await cb.answer()
@@ -2173,6 +2240,9 @@ async def cmd_report(message: Message):
 @router.message(F.text.in_({"⚙️ Панель администратора", "/admin"}))
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
+    if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
+        await message.answer("⚠️ Данный раздел доступен только администраторам кафе.")
+        return
     await message.answer("⚙️ <b>Панель администратора</b>", reply_markup=kb.admin_kb())
 
 
@@ -2281,7 +2351,8 @@ async def _show_admin_search_results(chat_id: int, bot: Bot, query: str):
         return
 
     lines = [header]
-    for o in orders:
+    for row in orders:
+        o = dict(row)
         dt = o["created_at"][:19].replace("T", " ")
         st = STATUS_TEXT.get(o["status"], o["status"])
         pay = PAYMENT_TEXT.get(o["payment"], o["payment"])
@@ -2419,6 +2490,9 @@ async def cb_admin_reviews_stats(cb: CallbackQuery):
 
 @router.message(F.text.in_({"📢 Сделать рассылку", "/broadcast"}))
 async def msg_start_broadcast(message: Message, state: FSMContext):
+    if not is_admin_user(message.from_user.id) and message.chat.id != MANAGER_CHAT_ID:
+        await message.answer("⚠️ Данная функция доступна только владельцу и администраторам кафе.")
+        return
     await state.set_state(BroadcastForm.waiting_for_content)
     await message.answer(
         "📢 <b>Таргетированная рассылка от владельца</b>\n\n"

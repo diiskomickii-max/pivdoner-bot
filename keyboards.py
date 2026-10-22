@@ -11,8 +11,21 @@ from config import WEBAPP_URL
 from menu import ITEMS, MENU, TOPPINGS, fmt_price, parse_cart_item
 
 
-def main_menu(is_admin_or_demo: bool = True) -> ReplyKeyboardMarkup:
+def main_menu(user_or_admin=None) -> ReplyKeyboardMarkup:
     """Постоянная панель быстрых действий (кнопки под строкой ввода)."""
+    is_admin = False
+    if isinstance(user_or_admin, bool):
+        is_admin = user_or_admin
+    elif isinstance(user_or_admin, int):
+        from config import ADMIN_IDS, DEMO_MODE
+        is_admin = DEMO_MODE or (user_or_admin in ADMIN_IDS)
+    elif user_or_admin is not None:
+        try:
+            from config import ADMIN_IDS, DEMO_MODE
+            is_admin = DEMO_MODE or (int(user_or_admin) in ADMIN_IDS)
+        except Exception:
+            is_admin = False
+
     buttons = [
         [KeyboardButton(text="🛒 Оформить заказ")],
         [KeyboardButton(text="🍔 Меню"), KeyboardButton(text="🧺 Корзина")],
@@ -20,7 +33,7 @@ def main_menu(is_admin_or_demo: bool = True) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="📍 Адрес и инфо"), KeyboardButton(text="🎲 Игра с бонусами")],
         [KeyboardButton(text="🚨 Подать жалобу")],
     ]
-    if is_admin_or_demo:
+    if is_admin:
         buttons.append([
             KeyboardButton(text="📢 Сделать рассылку"),
             KeyboardButton(text="⚙️ Панель администратора"),
