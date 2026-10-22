@@ -1461,26 +1461,42 @@ async def cb_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
             f"📍 Адрес: <b>{data.get('delivery_address')}</b>\n"
             f"⏱ Время доставки: <b>{data.get('pickup_time')}</b>\n"
         )
+        confirmation = (
+            f"✅ <b>Заказ №{order_id} передан на кухню!</b>\n\n"
+            f"{deliv_note}"
+            f"💰 Сумма к оплате: <b>{grand_total:.2f} Br</b>\n\n"
+            "💳 <b>Оплата через Яндекс:</b>\n"
+            "При оформлении курьерской доставки доступна только онлайн-оплата через сервис <b>Яндекс Еда / Go</b>.\n\n"
+            "Для дальнейшего оформления и оплаты заказа перейдите в Яндекс Доставку:"
+        )
+        await set_order_payment(order_id, "yandex_online")
+        await _send_order_to_group(bot, order_id, "yandex_online", cb.from_user.id)
+        
+        yandex_eda = os.getenv("YANDEX_EDA_URL", "https://eda.yandex.by/")
+        yandex_cab = os.getenv("YANDEX_DELIVERY_URL", "https://dostavka.yandex.by/")
+        markup = kb.yandex_delivery_payment_kb(yandex_eda, yandex_cab)
     else:
         deliv_note = (
             f"🕐 Время готовности: <b>{data['pickup_time']}</b>\n"
             f"📍 Забирайте: {CAFE['address']}\n"
         )
+        confirmation = (
+            f"✅ <b>Заказ №{order_id} сохранён!</b>\n\n"
+            f"{deliv_note}"
+            f"💰 К оплате: <b>{grand_total:.2f} Br</b>\n\n"
+            "💳 <b>Выберите способ оплаты</b> — после выбора заказ сразу поступит на кухню:"
+        )
+        markup = kb.payment_method_kb(order_id, pay_url)
 
-    confirmation = (
-        f"✅ <b>Заказ №{order_id} сохранён!</b>\n\n"
-        f"{deliv_note}"
-        f"💰 К оплате: <b>{grand_total:.2f} Br</b>\n\n"
-        "💳 <b>Выберите способ оплаты</b> — после выбора заказ сразу поступит на кухню:"
-    )
-
-    # Очищаем корзину и редактируем сообщение в выбор оплаты
+    # Очищаем корзину и редактируем сообщение
     await save_cart(state, {})
     await state.set_state(OrderForm.browsing)
     await state.update_data(current_step_msg_id=None)
 
-    await cb.message.edit_text(confirmation, reply_markup=kb.payment_method_kb(order_id, pay_url))
-    await cb.answer("Заказ сохранён")
+    await cb.message.edit_text(confirmation, reply_markup=markup)
+    if deliv_type == "yandex":
+        await cb.message.answer("Быстрые действия:", reply_markup=kb.main_menu())
+    await cb.answer("Заказ оформлен")
 
 
 @router.callback_query(F.data.startswith("pay_cash:"))
@@ -1690,8 +1706,15 @@ async def cb_status(cb: CallbackQuery, bot: Bot):
         except Exception:
             pass
 
+    if status == "cancelled":
+        try:
+            from yandex_delivery import cancel_delivery_simulation
+            cancel_delivery_simulation(order_id)
+        except Exception:
+            pass
+
     if status == "completed" and order.get("user_id"):
-        schedule_order_review(bot, order_id, order["user_id"], delay_sec=10)
+        schedule_order_review(bot, order_id, order["user_id"], delay_sec=1200)
 
 
 @router.callback_query(F.data.startswith("payok:"))
@@ -2157,10 +2180,14 @@ async def cb_cancel_broadcast(cb: CallbackQuery, state: FSMContext):
 
 # ---------- Функция 4: Автоматический сбор отзывов и репутация (NPS) ----------
 
-def schedule_order_review(bot: Bot, order_id: int, user_id: int, delay_sec: int = 15):
-    """Планирует опрос качества заказа (NPS) после выдачи/доставки."""
+def schedule_order_review(bot: Bot, order_id: int, user_id: int, delay_sec: int = 1200):
+    """Планирует опрос качества заказа (NPS) спустя 20 минут ПОСЛЕ подтверждения выдачи/доставки."""
     async def _job():
         await asyncio.sleep(delay_sec)
+        order = await get_order(order_id)
+        # Отправляем опрос ТОЛЬКО если заказ был подтверждён как выдан (completed) и не отменён
+        if not order or order.get("status") != "completed":
+            return
         try:
             await bot.send_message(
                 user_id,
