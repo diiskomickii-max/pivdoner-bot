@@ -1311,20 +1311,22 @@ async def cb_top_toggle(cb: CallbackQuery):
     idx_str = parts[2]
     old_mask = parts[3] if len(parts) >= 4 else ""
 
-    mask_set = set(old_mask)
+    mask_set = set(old_mask.split("_")) if old_mask else set()
     if idx_str in mask_set:
         mask_set.remove(idx_str)
     else:
         mask_set.add(idx_str)
-    new_mask = "".join(sorted(mask_set))
+    sorted_indices = sorted([int(x) for x in mask_set if x.isdigit()])
+    new_mask = "_".join(str(x) for x in sorted_indices)
 
     base = ITEMS.get(doner_id, {})
     total_price = base.get("price", 0.0)
     selected_names = []
-    for d in new_mask:
-        t = TOPPINGS[int(d)]
-        total_price += t["price"]
-        selected_names.append(t["name"])
+    for idx in sorted_indices:
+        if idx < len(TOPPINGS):
+            t = TOPPINGS[idx]
+            total_price += t["price"]
+            selected_names.append(t["name"])
 
     stop_list = await get_stop_list()
     tops_info = f"\nВыбрано: <i>{', '.join(selected_names)}</i>" if selected_names else ""
@@ -1361,11 +1363,12 @@ async def cb_top_add(cb: CallbackQuery, state: FSMContext):
 
     stopped_tops = []
     top_ids = []
-    for d in mask:
-        if d.isdigit() and int(d) < len(TOPPINGS):
-            tid = TOPPINGS[int(d)]["id"]
+    selected_indices = [int(x) for x in mask.split("_") if x.isdigit()] if mask else []
+    for idx in selected_indices:
+        if idx < len(TOPPINGS):
+            tid = TOPPINGS[idx]["id"]
             if tid in stop_list:
-                stopped_tops.append(TOPPINGS[int(d)]["name"])
+                stopped_tops.append(TOPPINGS[idx]["name"])
             else:
                 top_ids.append(tid)
 

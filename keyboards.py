@@ -238,6 +238,7 @@ def toppings_selector_kb(doner_id: str, mask: str = "", stop_list: dict = None) 
     base_item = ITEMS.get(doner_id, {})
     total_price = base_item.get("price", 0.0)
 
+    selected_set = set(mask.split("_")) if mask else set()
     for idx, top in enumerate(TOPPINGS):
         top_id = top["id"]
         is_stopped = bool(stop_list and top_id in stop_list)
@@ -245,7 +246,7 @@ def toppings_selector_kb(doner_id: str, mask: str = "", stop_list: dict = None) 
             label = f"⛔ {top['name']} (закончилась)"
             kb.row(InlineKeyboardButton(text=label, callback_data=f"top_blocked:{top_id}"))
             continue
-        is_selected = str(idx) in mask
+        is_selected = str(idx) in selected_set
         prefix = "✅" if is_selected else "▫️"
         label = f"{prefix} {top['name']} (+{top['price']:.2f} Br)"
         if is_selected:
