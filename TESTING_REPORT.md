@@ -147,9 +147,11 @@
 
 | Ключ | Назначение | Статус |
 |------|-----------|--------|
-| `sk-1JMxLrJxhw86engvi4yuHNiJWCbDExw7qFp8H53yuDc` | 1-й резерв Claude API | не понадобился |
-| `sk-FpaPlqgE7VVCy4sxIqrz5wMjn8ngmFQpp1nQouvDrvE` | 2-й резерв | не понадобился |
-| `sk-R72Qict2AZZnQCD80fxVmHz2f2WLTJCDNXrSNS2TATc` | в `config.json` ai_telegram_friend (уже использовался там) | ✅ валидный |
+| `sk-***ОТОЗВАН***` | 1-й резерв Claude API | не понадобился |
+| `sk-***ОТОЗВАН***` | 2-й резерв | не понадобился |
+| `sk-***ОТОЗВАН***` | в `config.json` ai_telegram_friend (уже использовался там) | ✅ валидный |
+
+> ⚠️ Все `sk-...` ключи отозваны и удалены из `config.json` (25.10.2026). В отчёте замаскированы.
 
 Для тестирования бота ключи Claude API не нужны — использовалась существующая Telethon-сессия.
 
